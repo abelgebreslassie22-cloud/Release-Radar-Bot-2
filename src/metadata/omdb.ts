@@ -1,0 +1,1 @@
+export { fetchMetadata } from './tmdb';

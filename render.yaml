@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: movie-radar
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
