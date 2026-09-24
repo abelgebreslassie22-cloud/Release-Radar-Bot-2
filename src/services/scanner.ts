@@ -2,11 +2,13 @@ import { db } from '../database/db';
 import { watchlist, releases, settings } from '../database/schema';
 import { fetchMetadata } from '../metadata/tmdb';
 import { sendTelegramNotification } from '../telegram/bot';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { logInfo, logError, logWarning, logSuccess, logDebug } from './logger';
 import { Provider } from '../types';
 import { getStandardizedMatchKey, normalizeMediaTitle } from '../utils/mediaGrouper';
 import { generateCustomPoster } from '../utils/posterGenerator';
+import { DownloadRadarProvider } from '../providers/downloadRadarProvider';
+import { TMDBPremiereProvider } from '../providers/tmdbProvider';
 
 let isScanning = false;
 
@@ -49,7 +51,6 @@ export function isWatchlistMatch(
 }
 
 export async function runScan() {
-
   if (isScanning) {
     console.log('Scan already in progress. Skipping...');
     return;
@@ -65,195 +66,194 @@ export async function runScan() {
     }
     
     const activeSettings: any = currentSettings[0] || {};
-    let providers: Provider[] = [];
     
-    if (activeSettings.providerType === 'MOCK') {
-      const { MockRSSProvider } = await import('../providers/mockRssProvider');
-      providers.push(new MockRSSProvider());
-    } else if (activeSettings.providerType === 'RSS' && activeSettings.providerUrl) {
-      const { RSSProvider } = await import('../providers/rssProvider');
-      providers.push(new RSSProvider(activeSettings.providerUrl));
-    } else if (activeSettings.providerType === 'TMDB') {
-      const { TMDBPremiereProvider } = await import('../providers/tmdbProvider');
-      providers.push(new TMDBPremiereProvider());
-    } else if (activeSettings.providerType === 'NONE') {
-      await logInfo('Provider is disabled (NONE). Skipping scan.', 'Scanner');
-      return;
-    } else if (activeSettings.providerUrl) {
-      const { RSSProvider } = await import('../providers/rssProvider');
-      providers.push(new RSSProvider(activeSettings.providerUrl));
-    } else {
-      // Default: TMDB Digital & TV Premiere Polling
-      const { TMDBPremiereProvider } = await import('../providers/tmdbProvider');
-      providers.push(new TMDBPremiereProvider());
-    }
-
     const items = await db.select().from(watchlist);
     if (items.length === 0) {
-      console.log('Watchlist is empty. Scanner is configured to only search your watchlist.');
-      await logInfo('Watchlist is empty. Skipping scan as scanner only searches items on your watchlist.', 'Scanner');
+      console.log('Watchlist is empty. Scanner only monitors your watchlist.');
+      await logInfo('Watchlist is empty. Add titles via /add or the web app to monitor releases.', 'Scanner');
       return;
     }
 
-    for (const provider of providers) {
-      try {
-        let matchingCount = 0;
-        let notificationsCount = 0;
-        
-        await logInfo(`Provider started: ${provider.name}`, 'Scanner');
-        await logInfo(`Searching ${items.length} watchlist item(s)...`, 'Scanner');
-        
-        const foundItems = await provider.scan(items);
-        
-        await logSuccess(`Items received: ${foundItems.length}`, 'Scanner');
+    await logInfo(`Searching ${items.length} watchlist item(s) across download indexers & premiere radar...`, 'Scanner');
 
-        // Fetch existing release cards from database
-        const existingReleases = await db.select().from(releases);
+    // 1. Always initialize DownloadRadarProvider (Scene & Web Release Indexer)
+    const downloadRadar = new DownloadRadarProvider();
+    const tmdbRadar = new TMDBPremiereProvider();
 
-        const matchedNotifications: any[] = [];
+    // Scan for downloads
+    let downloadItems: any[] = [];
+    try {
+      await logInfo('Checking scene release indexers for available downloads...', 'DownloadRadar');
+      downloadItems = await downloadRadar.scan(items);
+      await logSuccess(`Found ${downloadItems.length} active download release(s)`, 'DownloadRadar');
+    } catch (e: any) {
+      await logWarning(`Download radar scan failed: ${e.message}`, 'DownloadRadar');
+    }
 
-        for (const item of foundItems) {
-          // Strictly verify the item matches the watchlist
-          const isMatched = isWatchlistMatch(item, items);
-          if (!isMatched) {
-            continue;
-          }
+    // Scan TMDB for streaming/air-dates/metadata
+    let tmdbItems: any[] = [];
+    try {
+      tmdbItems = await tmdbRadar.scan(items);
+    } catch (e: any) {
+      await logWarning(`TMDB radar scan failed: ${e.message}`, 'TMDBRadar');
+    }
 
-          // Fetch or prepare poster and metadata
-          let posterUrl = item.poster || null;
-          let metadata: any = null;
-          if (!posterUrl) {
-            const baseTitle = normalizeMediaTitle(item.title);
-            metadata = await fetchMetadata(baseTitle, item.year, item.type);
-            posterUrl = metadata?.poster || null;
-          }
-          if (!metadata) {
-            metadata = {
-              poster: posterUrl,
-              overview: item.overview || `Monitored from ${provider.name}. ${item.title}`,
-              sourceUrl: item.sourceUrl,
-            };
-          }
-          if (!posterUrl) {
-            posterUrl = generateCustomPoster({
-              title: item.title,
-              year: item.year,
-              type: item.type,
-              releaseType: item.releaseType,
-              sourceUrl: item.sourceUrl,
-              provider: provider.name,
-            });
-            metadata.poster = posterUrl;
-          }
+    // Fetch existing release cards from database
+    const existingReleases = await db.select().from(releases);
+    const notificationsToSend: any[] = [];
 
-          // Single Card per Movie or Series:
-          // Check if an existing card already exists for this title & media type
-          const normItemTitle = normalizeMediaTitle(item.title).toLowerCase().replace(/[^a-z0-9]/g, '');
-          const isItemTV = item.type?.toLowerCase() === 'series' || item.type?.toLowerCase() === 'anime';
+    // Process each watchlist item individually to ensure exactly ONE consolidated card per title
+    for (const wl of items) {
+      const normWlTitle = normalizeMediaTitle(wl.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const isTV = wl.type?.toLowerCase() === 'series' || wl.type?.toLowerCase() === 'anime';
 
-          const existingCard = existingReleases.find(r => {
-            const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
-            const isRTV = r.type?.toLowerCase() === 'series' || r.type?.toLowerCase() === 'anime';
-            const sameType = isItemTV === isRTV;
-            const titleMatch = normItemTitle === normRTitle || normItemTitle.startsWith(normRTitle) || normRTitle.startsWith(normItemTitle);
-            return titleMatch && sameType;
+      // Check if a download is available for this title
+      const dlItem = downloadItems.find(d => {
+        const normDTitle = normalizeMediaTitle(d.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+        return normDTitle === normWlTitle || normDTitle.includes(normWlTitle) || normWlTitle.includes(normDTitle);
+      });
+
+      // Check TMDB premiere / streaming status
+      const tmdbItem = tmdbItems.find(t => {
+        const normTTitle = normalizeMediaTitle(t.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+        return normTTitle === normWlTitle || normTTitle.includes(normWlTitle) || normWlTitle.includes(normTTitle);
+      });
+
+      // Fetch official poster and metadata
+      const baseTitle = normalizeMediaTitle(wl.title);
+      let metadata: any = await fetchMetadata(baseTitle, wl.year, wl.type);
+      let posterUrl = metadata?.poster || null;
+
+      if (!metadata) {
+        metadata = {
+          poster: posterUrl,
+          overview: `Monitored watchlist item: ${wl.title} (${wl.year})`,
+          sourceUrl: dlItem?.sourceUrl || tmdbItem?.sourceUrl || '',
+        };
+      }
+      if (!posterUrl) {
+        posterUrl = generateCustomPoster({
+          title: wl.title,
+          year: wl.year,
+          type: wl.type,
+          releaseType: dlItem?.releaseType || tmdbItem?.releaseType || 'Monitored',
+          sourceUrl: dlItem?.sourceUrl || tmdbItem?.sourceUrl || '',
+          provider: dlItem ? 'Download Radar' : 'TMDB Radar',
+        });
+        metadata.poster = posterUrl;
+      }
+
+      // Determine final status, sourceUrl, provider, and seeders
+      let finalStatus: string;
+      let finalSourceUrl: string;
+      let finalProvider: string;
+      let finalSeeders = 0;
+      let finalLeechers = 0;
+
+      if (dlItem) {
+        finalStatus = dlItem.releaseType;
+        finalSourceUrl = dlItem.sourceUrl;
+        finalProvider = 'Download Availability Radar';
+        finalSeeders = dlItem.seeders || 0;
+        finalLeechers = dlItem.leechers || 0;
+      } else if (tmdbItem) {
+        finalStatus = tmdbItem.releaseType;
+        finalSourceUrl = tmdbItem.sourceUrl;
+        finalProvider = 'TMDB Premiere Radar';
+      } else {
+        finalStatus = `⏳ Monitoring release schedule`;
+        finalSourceUrl = metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`;
+        finalProvider = 'Release Radar';
+      }
+
+      // Find existing card in database
+      const existingCard = existingReleases.find(r => {
+        const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+        const isRTV = r.type?.toLowerCase() === 'series' || r.type?.toLowerCase() === 'anime';
+        const sameType = isTV === isRTV;
+        const titleMatch = normWlTitle === normRTitle || normWlTitle.startsWith(normRTitle) || normRTitle.startsWith(normWlTitle);
+        return titleMatch && sameType;
+      });
+
+      if (existingCard) {
+        // Did status transition to Download Available, or did episode/link change?
+        const isNowDownload = finalStatus.includes('Download Available');
+        const wasDownload = existingCard.releaseType.includes('Download Available');
+        const statusChanged = existingCard.releaseType !== finalStatus || existingCard.sourceUrl !== finalSourceUrl;
+        const becameDownloadable = isNowDownload && !wasDownload;
+
+        await db.update(releases).set({
+          title: wl.title,
+          year: wl.year,
+          type: wl.type,
+          provider: finalProvider,
+          sourceUrl: finalSourceUrl,
+          releaseType: finalStatus,
+          poster: posterUrl,
+          metadataJson: metadata,
+          seeders: finalSeeders,
+          leechers: finalLeechers,
+        }).where(eq(releases.id, existingCard.id));
+
+        // Update in-memory reference
+        existingCard.releaseType = finalStatus;
+        existingCard.sourceUrl = finalSourceUrl;
+        existingCard.poster = posterUrl;
+        existingCard.metadataJson = metadata;
+
+        if (becameDownloadable || (statusChanged && isNowDownload)) {
+          await logSuccess(`🔥 Download alert ready: ${wl.title} [${finalStatus}]`, 'DownloadRadar');
+          notificationsToSend.push({
+            id: existingCard.id,
+            title: wl.title,
+            year: wl.year,
+            type: wl.type,
+            provider: finalProvider,
+            sourceUrl: finalSourceUrl,
+            releaseType: finalStatus,
+            poster: posterUrl,
+            metadataJson: metadata,
           });
-
-          if (existingCard) {
-            // Check if status, link, or poster updated
-            const statusChanged = existingCard.releaseType !== item.releaseType || existingCard.sourceUrl !== item.sourceUrl;
-            
-            // Update the single card in place
-            await db.update(releases).set({
-              title: item.title,
-              year: item.year,
-              type: item.type,
-              provider: provider.name,
-              sourceUrl: item.sourceUrl,
-              releaseType: item.releaseType,
-              poster: posterUrl,
-              metadataJson: metadata,
-              seeders: item.seeders || 0,
-              leechers: item.leechers || 0,
-            }).where(eq(releases.id, existingCard.id));
-
-            // Update in-memory reference
-            existingCard.releaseType = item.releaseType;
-            existingCard.sourceUrl = item.sourceUrl;
-            existingCard.poster = posterUrl;
-            existingCard.metadataJson = metadata;
-
-            if (statusChanged) {
-              matchingCount++;
-              await logSuccess(`Updated release card: ${item.title} (${item.year}) [${item.releaseType}]`, 'Matcher');
-              matchedNotifications.push({ item, metadata: { ...metadata, poster: posterUrl } });
-            } else {
-              if (activeSettings.debugMode === 1) {
-                await logDebug(`Release card up-to-date: ${item.title} (${item.releaseType})`, 'Scanner');
-              }
-            }
-          } else {
-            // Insert single new card for this title
-            const [inserted] = await db.insert(releases).values({
-              title: item.title,
-              year: item.year,
-              type: item.type,
-              provider: provider.name,
-              sourceUrl: item.sourceUrl,
-              releaseType: item.releaseType,
-              seeders: item.seeders || 0,
-              leechers: item.leechers || 0,
-              poster: posterUrl,
-              metadataJson: metadata,
-            }).returning();
-
-            if (inserted) {
-              existingReleases.push(inserted);
-            }
-
-            matchingCount++;
-            await logSuccess(`Watchlist card created: ${item.title} (${item.year}) [${item.releaseType}]`, 'Matcher');
-            matchedNotifications.push({ item, metadata: { ...metadata, poster: posterUrl } });
-          }
+        } else if (statusChanged) {
+          await logInfo(`Updated release card: ${wl.title} [${finalStatus}]`, 'Scanner');
         }
+      } else {
+        // Insert new card for this title
+        const [inserted] = await db.insert(releases).values({
+          title: wl.title,
+          year: wl.year,
+          type: wl.type,
+          provider: finalProvider,
+          sourceUrl: finalSourceUrl,
+          releaseType: finalStatus,
+          seeders: finalSeeders,
+          leechers: finalLeechers,
+          poster: posterUrl,
+          metadataJson: metadata,
+        }).returning();
 
-        // Send notifications for matches (new cards or status updates)
-        for (const { item, metadata } of matchedNotifications) {
-          try {
-            await sendTelegramNotification({
-              id: 0,
-              ...item,
-              provider: provider.name,
-              poster: metadata?.poster || null,
-              metadataJson: metadata,
-              createdAt: new Date().toISOString()
-            });
-            notificationsCount++;
-          } catch (notifErr: any) {
-            await logError(`Failed to send notification: ${notifErr.message}`, 'Telegram');
-          }
-          
-          // Wait 1 second before sending the next notification to avoid Telegram rate limits
-          if (matchedNotifications.length > 1) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          }
+        if (inserted) {
+          existingReleases.push(inserted);
+          await logSuccess(`Created release card: ${wl.title} [${finalStatus}]`, 'Matcher');
+          notificationsToSend.push(inserted);
         }
-        
-        await logSuccess(`Matching watchlist:\n${matchingCount}`, 'Scanner');
-        await logSuccess(`Notifications sent:\n${notificationsCount}`, 'Scanner');
-        
-        await logInfo(`Provider scan completed: ${provider.name}`, 'Provider');
-      } catch (error: any) {
-        console.error(`Error scanning provider ${provider.name}:`, error);
-        await logError(`Provider connection failed: ${provider.name}`, 'Provider', { error: error.message });
       }
     }
+
+    // Send Telegram notifications for new or upgraded cards
+    for (const item of notificationsToSend) {
+      try {
+        await sendTelegramNotification(item);
+      } catch (err: any) {
+        console.error('Failed to dispatch notification:', err);
+      }
+    }
+
+    await logSuccess(`Scan complete. ${notificationsToSend.length} alert(s) dispatched.`, 'Scanner');
   } catch (error: any) {
-    console.error('Error during runScan execution:', error);
-    await logError(`Error during runScan execution: ${error.message}`, 'Scanner');
+    console.error('Error in scanner execution:', error);
+    await logError(`Scanner execution error: ${error.message}`, 'Scanner');
   } finally {
     isScanning = false;
   }
-  
-  console.log('Provider scan finished.');
 }

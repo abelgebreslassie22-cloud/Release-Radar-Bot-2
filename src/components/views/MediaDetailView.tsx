@@ -498,6 +498,7 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
         {/* List of Releases */}
         <div className="space-y-3">
           {sortedReleases.map((rel) => {
+            const isMagnetUrl = rel.sourceUrl && rel.sourceUrl.startsWith('magnet:');
             const isHttpUrl = rel.sourceUrl && (rel.sourceUrl.startsWith('http://') || rel.sourceUrl.startsWith('https://'));
             return (
               <div 
@@ -528,6 +529,37 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
                 </div>
 
                 <div className="flex items-center gap-2.5 shrink-0 pt-2 md:pt-0">
+                  {isMagnetUrl && (
+                    <>
+                      <button
+                        onClick={() => handleCopyReleaseLink(rel)}
+                        className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-xl border border-emerald-200 transition-colors text-xs font-semibold flex items-center gap-1.5 shadow-sm"
+                        title="Copy Magnet Link"
+                      >
+                        {copiedId === rel.id ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            <span className="text-emerald-700">Copied Magnet!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy Magnet</span>
+                          </>
+                        )}
+                      </button>
+
+                      <a
+                        href={rel.sourceUrl}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                        title="Open in Torrent Client"
+                      >
+                        <Zap className="w-3.5 h-3.5" />
+                        <span>Open Magnet</span>
+                      </a>
+                    </>
+                  )}
+
                   {isHttpUrl && (
                     <>
                       <button

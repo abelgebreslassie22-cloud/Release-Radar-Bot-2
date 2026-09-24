@@ -65,16 +65,18 @@ export default function SettingsView() {
 
       setEnvStatus(envRes);
 
-      const defaultAppUrl = typeof window !== 'undefined' 
-        ? window.location.origin 
-        : 'https://release-radar-bot.onrender.com';
+      const defaultAppUrl = 'https://release-radar-bot-2.onrender.com';
+      let loadedAppUrl = settingsRes.appUrl || envRes.appUrl || '';
+      if (!loadedAppUrl || loadedAppUrl.includes('jrnm.app') || loadedAppUrl.includes('ais-dev-') || loadedAppUrl.includes('ais-pre-') || loadedAppUrl.includes('release-radar-bot.onrender.com')) {
+        loadedAppUrl = defaultAppUrl;
+      }
 
       setForm({
         databaseUrl: '',
         telegramBotToken: '',
         telegramChatId: settingsRes.telegramChatId || envRes.telegramChatId || '',
         metadataApiKey: settingsRes.metadataApiKey || '',
-        appUrl: settingsRes.appUrl || envRes.appUrl || defaultAppUrl,
+        appUrl: loadedAppUrl,
         scanInterval: settingsRes.scanInterval || envRes.scanInterval || 10,
         providerType: settingsRes.providerType || envRes.providerType || 'TMDB',
         providerUrl: settingsRes.providerUrl || '',
@@ -578,13 +580,17 @@ export default function SettingsView() {
                 <select
                   value={form.providerType}
                   onChange={e => setForm({ ...form, providerType: e.target.value })}
-                  className="w-full px-3 py-2.5 bg-white border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+                  className="w-full px-3 py-2.5 bg-white border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium"
                 >
-                  <option value="TMDB">TMDB Digital Premiere & TV Schedule (Recommended)</option>
+                  <option value="TMDB">Real-Time Download Radar + TMDB (Recommended)</option>
+                  <option value="DOWNLOAD_RADAR">Download Availability Radar Only (Scene Torrents & Magnets)</option>
                   <option value="RSS">Custom RSS Feed</option>
                   <option value="MOCK">Mock Provider (Testing)</option>
                   <option value="NONE">Disabled</option>
                 </select>
+                <p className="text-xs text-gray-500 mt-1.5">
+                  Tracks the exact moment movies and episodes drop online with 1080p/4K download & magnet links, seed counts, and official streaming dates.
+                </p>
               </div>
 
               <div>

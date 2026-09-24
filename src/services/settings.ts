@@ -22,6 +22,10 @@ export async function initializeSettings(instanceId?: string) {
       if (!active.providerType || active.providerType === 'PIRATEBAY' || active.providerType === 'TORZNAB' || (active.providerType === 'RSS' && !active.providerUrl)) {
         updates.providerType = 'TMDB';
       }
+      // Ensure appUrl points to the real public URL (https://release-radar-bot-2.onrender.com) and clear any preview/sandbox links
+      if (!active.appUrl || active.appUrl.includes('jrnm.app') || active.appUrl.includes('ais-dev-') || active.appUrl.includes('ais-pre-') || active.appUrl.includes('release-radar-bot.onrender.com')) {
+        updates.appUrl = 'https://release-radar-bot-2.onrender.com';
+      }
       if (Object.keys(updates).length > 0) {
         await db.update(settings).set(updates).where(eq(settings.id, active.id));
       }

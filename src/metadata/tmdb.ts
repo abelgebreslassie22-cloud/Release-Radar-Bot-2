@@ -77,3 +77,57 @@ export async function fetchMetadata(title: string, year: number, type: string): 
     return null;
   }
 }
+
+export interface MediaSearchResult {
+  title: string;
+  year: number;
+  type: string;
+  poster?: string;
+  overview?: string;
+}
+
+export async function searchMedia(query: string): Promise<MediaSearchResult[]> {
+  try {
+    const settings = await getSettings();
+    const apiKey = settings?.metadataApiKey || process.env.TMDB_API_KEY;
+    if (!apiKey) {
+      return [{
+        title: query,
+        year: new Date().getFullYear(),
+        type: 'Movie',
+      }];
+    }
+
+    const searchUrl = `https://api.themoviedb.org/3/search/multi`;
+    const res = await axios.get(searchUrl, {
+      params: {
+        api_key: apiKey,
+        query: query.trim(),
+      },
+      timeout: 5000,
+    });
+
+    const results = (res.data?.results || []).filter((r: any) => r.media_type === 'movie' || r.media_type === 'tv');
+    
+    return results.map((r: any) => {
+      const isTV = r.media_type === 'tv';
+      const rawDate = isTV ? r.first_air_date : r.release_date;
+      const parsedYear = rawDate ? new Date(rawDate).getFullYear() : new Date().getFullYear();
+      const poster = r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : undefined;
+
+      return {
+        title: isTV ? (r.name || r.original_name) : (r.title || r.original_title),
+        year: parsedYear || new Date().getFullYear(),
+        type: isTV ? 'Series' : 'Movie',
+        poster,
+        overview: r.overview,
+      };
+    });
+  } catch (error) {
+    return [{
+      title: query,
+      year: new Date().getFullYear(),
+      type: 'Movie',
+    }];
+  }
+}
