@@ -24,6 +24,7 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
   const [copiedLink, setCopiedLink] = useState(false);
   const [sortBy, setSortBy] = useState<'quality' | 'date'>('quality');
   const [searchQuery, setSearchQuery] = useState('');
+  const [qualityFilter, setQualityFilter] = useState<string>('all');
   const [deleteConfirm, setDeleteConfirm] = useState<{
     isOpen: boolean;
     type: 'all' | 'single';
@@ -192,8 +193,28 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
   const imdbSearchUrl = `https://www.imdb.com/find/?q=${encodeURIComponent(group.canonicalTitle)}`;
   const googleSearchUrl = `https://www.google.com/search?q=${encodeURIComponent(group.canonicalTitle + ' ' + group.type + ' watch online')}`;
 
+  // Quality counts for filter buttons
+  const qualityCounts = {
+    all: group.releases.length,
+    '4k': group.releases.filter(r => /2160p|4k|uhd/i.test(r.releaseType) || /2160p|4k|uhd/i.test(r.title)).length,
+    '1080p': group.releases.filter(r => /1080p/i.test(r.releaseType) || /1080p/i.test(r.title)).length,
+    '720p': group.releases.filter(r => /720p/i.test(r.releaseType) || /720p/i.test(r.title)).length,
+    packs: group.releases.filter(r => /season|pack/i.test(r.releaseType) || /season|pack/i.test(r.title)).length,
+  };
+
   // Filter and sort releases
   const filteredReleases = group.releases.filter(r => {
+    // Quality tab filter
+    if (qualityFilter === '4k') {
+      if (!/2160p|4k|uhd/i.test(r.releaseType) && !/2160p|4k|uhd/i.test(r.title)) return false;
+    } else if (qualityFilter === '1080p') {
+      if (!/1080p/i.test(r.releaseType) && !/1080p/i.test(r.title)) return false;
+    } else if (qualityFilter === '720p') {
+      if (!/720p/i.test(r.releaseType) && !/720p/i.test(r.title)) return false;
+    } else if (qualityFilter === 'packs') {
+      if (!/season|pack/i.test(r.releaseType) && !/season|pack/i.test(r.title)) return false;
+    }
+
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
     return r.title.toLowerCase().includes(q) || r.releaseType.toLowerCase().includes(q);
@@ -205,16 +226,18 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
     }
 
     if (sortBy === 'quality') {
-      const qualityRank = (type: string) => {
-        const l = (type || '').toLowerCase();
-        if (l.includes('4k') || l.includes('2160p')) return 4;
-        if (l.includes('1080p')) return 3;
-        if (l.includes('bluray')) return 2;
-        if (l.includes('720p')) return 1;
+      const qualityRank = (type: string, title: string) => {
+        const text = `${type} ${title}`.toLowerCase();
+        if (text.includes('4k') || text.includes('2160p')) return 4;
+        if (text.includes('1080p')) return 3;
+        if (text.includes('bluray')) return 2;
+        if (text.includes('720p')) return 1;
         return 0;
       };
-      const rankDiff = qualityRank(b.releaseType) - qualityRank(a.releaseType);
+      const rankDiff = qualityRank(b.releaseType, b.title) - qualityRank(a.releaseType, a.title);
       if (rankDiff !== 0) return rankDiff;
+      const seedDiff = (b.seeders || 0) - (a.seeders || 0);
+      if (seedDiff !== 0) return seedDiff;
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     }
 
@@ -493,6 +516,87 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
               </button>
             </div>
           </div>
+        </div>
+
+        {/* Quality Filter Tabs */}
+        <div className="flex flex-wrap items-center gap-2 pt-1 pb-1">
+          <button
+            onClick={() => setQualityFilter('all')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              qualityFilter === 'all'
+                ? 'bg-slate-900 text-white shadow-sm'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            All Qualities
+            <span className={`px-1.5 py-0.5 rounded-md text-[10px] ${qualityFilter === 'all' ? 'bg-slate-700 text-slate-200' : 'bg-gray-200 text-gray-700'}`}>
+              {qualityCounts.all}
+            </span>
+          </button>
+
+          {qualityCounts['4k'] > 0 && (
+            <button
+              onClick={() => setQualityFilter('4k')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                qualityFilter === '4k'
+                  ? 'bg-purple-600 text-white shadow-sm'
+                  : 'bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200/60'
+              }`}
+            >
+              ✨ 4K UHD
+              <span className={`px-1.5 py-0.5 rounded-md text-[10px] ${qualityFilter === '4k' ? 'bg-purple-800 text-purple-200' : 'bg-purple-100 text-purple-800'}`}>
+                {qualityCounts['4k']}
+              </span>
+            </button>
+          )}
+
+          {qualityCounts['1080p'] > 0 && (
+            <button
+              onClick={() => setQualityFilter('1080p')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                qualityFilter === '1080p'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200/60'
+              }`}
+            >
+              🍿 1080p Full HD
+              <span className={`px-1.5 py-0.5 rounded-md text-[10px] ${qualityFilter === '1080p' ? 'bg-indigo-800 text-indigo-200' : 'bg-indigo-100 text-indigo-800'}`}>
+                {qualityCounts['1080p']}
+              </span>
+            </button>
+          )}
+
+          {qualityCounts['720p'] > 0 && (
+            <button
+              onClick={() => setQualityFilter('720p')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                qualityFilter === '720p'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200/60'
+              }`}
+            >
+              📺 720p HD
+              <span className={`px-1.5 py-0.5 rounded-md text-[10px] ${qualityFilter === '720p' ? 'bg-emerald-800 text-emerald-200' : 'bg-emerald-100 text-emerald-800'}`}>
+                {qualityCounts['720p']}
+              </span>
+            </button>
+          )}
+
+          {qualityCounts.packs > 0 && (
+            <button
+              onClick={() => setQualityFilter('packs')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                qualityFilter === 'packs'
+                  ? 'bg-amber-600 text-white shadow-sm'
+                  : 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200/60'
+              }`}
+            >
+              📦 Season Packs
+              <span className={`px-1.5 py-0.5 rounded-md text-[10px] ${qualityFilter === 'packs' ? 'bg-amber-800 text-amber-200' : 'bg-amber-100 text-amber-800'}`}>
+                {qualityCounts.packs}
+              </span>
+            </button>
+          )}
         </div>
 
         {/* List of Releases */}

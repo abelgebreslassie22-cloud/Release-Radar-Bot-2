@@ -6,7 +6,8 @@ const TelegramBot = (typeof TelegramBotModule === 'function')
 import { getSettings } from '../services/settings';
 import { ReleaseItem } from '../utils/mediaGrouper';
 import { logInfo, logError, logSuccess, logWarning } from '../services/logger';
-import { getGroupKey } from '../utils/mediaGrouper';
+import { getGroupKey, normalizeMediaTitle } from '../utils/mediaGrouper';
+import { extractEpisodeOrPack } from '../providers/downloadRadarProvider';
 import { db } from '../database/db';
 import { watchlist, releases } from '../database/schema';
 import { desc, eq } from 'drizzle-orm';
@@ -103,6 +104,28 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       bot.deleteMyCommands().catch(() => {});
     } catch (e) {}
 
+    const chatSearchResults = new Map<number, any[]>();
+    const chatSearchActive = new Set<number>();
+
+    const COLLAPSED_KEYBOARD = {
+      keyboard: [
+        [{ text: '📋 Menu' }]
+      ],
+      resize_keyboard: true,
+      is_persistent: true
+    };
+
+    const EXPANDED_KEYBOARD = {
+      keyboard: [
+        [{ text: '🔍 Search & Add' }, { text: '📋 Watchlist' }],
+        [{ text: '🎬 Recent Releases' }, { text: '🔄 Scan Now' }],
+        [{ text: '🍿 Main Dashboard' }, { text: '🌐 Web App' }],
+        [{ text: '✖️ Close Menu' }]
+      ],
+      resize_keyboard: true,
+      is_persistent: true
+    };
+
     const sendDashboard = async (chatId: number, messageId?: number) => {
       try {
         const baseUrl = await getBaseUrl();
@@ -115,16 +138,16 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
 <b>Watchlist:</b> ${wlCount.length} Items Monitored
 <b>Discovered Releases:</b> ${relCount.length} Total
 
-<i>Tap an action below to manage your tracker:</i>`;
+<i>Tap an action button below:</i>`;
         
         const inlineKeyboard = [
           [
-            { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' },
-            { text: '🎬 Recent Releases', callback_data: 'menu_recent_0' }
+            { text: '🔍 Search & Add Title', callback_data: 'action_search_title' },
+            { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' }
           ],
           [
-            { text: '🔄 Force Scan Now', callback_data: 'action_force_scan' },
-            { text: '➕ How to Add', callback_data: 'action_how_to_add' }
+            { text: '🎬 Recent Releases', callback_data: 'menu_recent_0' },
+            { text: '🔄 Force Scan Now', callback_data: 'action_force_scan' }
           ],
           [
             { text: '🌐 Open Full Web App', url: baseUrl }
@@ -147,138 +170,246 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       }
     };
 
-    // Main /start command
-    bot.onText(/\/start/, (msg: any) => {
-      bot.sendMessage(msg.chat.id, '✅ <b>Connected to Release Radar!</b>\n\nUse the buttons below or send <code>/scan</code>, <code>/watchlist</code>, or <code>/add &lt;movie or show&gt;</code> to control your radar.', {
-        parse_mode: 'HTML',
-        reply_markup: {
-          keyboard: [
-            [{ text: '📋 Menu' }, { text: '🔄 Scan' }, { text: '📋 Watchlist' }]
-          ],
-          resize_keyboard: true,
-          is_persistent: true
+    const handleSearchQuery = async (chatId: number, queryText: string) => {
+      chatSearchActive.delete(chatId);
+      const query = queryText.trim();
+      if (!query) return;
+
+      const searchingMsg = await bot.sendMessage(chatId, `🔍 Searching TMDB for "<b>${escapeHtml(query)}</b>"...`, { parse_mode: 'HTML' });
+
+      try {
+        const results = await searchMedia(query);
+        if (results.length === 0) {
+          bot.deleteMessage(chatId, searchingMsg.message_id).catch(() => {});
+          return bot.sendMessage(chatId, `❌ No movies or TV series found for "<b>${escapeHtml(query)}</b>".`, {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🔍 Try Another Search', callback_data: 'action_search_title' }],
+                [{ text: '🔙 Back to Dashboard', callback_data: 'action_main_menu' }]
+              ]
+            }
+          });
         }
+
+        const topResults = results.slice(0, 4);
+        chatSearchResults.set(chatId, topResults);
+
+        let listText = `🔍 <b>Select a Title to Track:</b>\n\n`;
+        const buttons: any[] = [];
+
+        topResults.forEach((r, idx) => {
+          const isTV = r.type === 'Series';
+          const icon = isTV ? '📺' : '🎬';
+          const star = r.voteAverage ? ` • ⭐ ${r.voteAverage}` : '';
+          const snippet = r.overview ? `\n   <i>${escapeHtml(r.overview.slice(0, 95))}...</i>` : '';
+          listText += `${idx + 1}. ${icon} <b>${escapeHtml(r.title)}</b> (${r.year}) [${r.type}]${star}${snippet}\n\n`;
+
+          buttons.push([
+            {
+              text: `➕ Add: ${r.title.slice(0, 22)} (${r.year})`,
+              callback_data: `add_tmdb_${idx}`
+            }
+          ]);
+        });
+
+        buttons.push([
+          { text: '🔍 Search Another', callback_data: 'action_search_title' },
+          { text: '❌ Cancel', callback_data: 'action_main_menu' }
+        ]);
+
+        bot.deleteMessage(chatId, searchingMsg.message_id).catch(() => {});
+        await bot.sendMessage(chatId, listText, {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: buttons }
+        });
+      } catch (err: any) {
+        bot.deleteMessage(chatId, searchingMsg.message_id).catch(() => {});
+        bot.sendMessage(chatId, `❌ Search error: ${err.message}`, { parse_mode: 'HTML' });
+      }
+    };
+
+    const handleWatchlistView = async (chatId: number, page: number = 0, messageId?: number) => {
+      const itemsPerPage = 4;
+      const items = await db.select().from(watchlist).orderBy(desc(watchlist.createdAt));
+      const totalPages = Math.ceil(items.length / itemsPerPage) || 1;
+      const pagedItems = items.slice(page * itemsPerPage, (page + 1) * itemsPerPage);
+      const baseUrl = await getBaseUrl();
+
+      if (items.length === 0) {
+        if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+        bot.sendMessage(chatId, '📋 <b>Your Watchlist is currently empty.</b>\n\nTap "🔍 Search & Add" below to find and track your favorite movies or shows!', {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔍 Search & Add Title', callback_data: 'action_search_title' }],
+              [{ text: '🌐 Open Web Watchlist', url: `${baseUrl}/#/watchlist` }],
+              [{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      let listText = `<b>📋 Your Watchlist (Page ${page + 1} of ${totalPages}):</b>\n\n`;
+      const buttons: any[] = [];
+
+      pagedItems.forEach((item, idx) => {
+        const num = (page * itemsPerPage) + idx + 1;
+        const groupKey = getGroupKey(item.title, item.type);
+        const icon = item.type === 'Series' ? '📺' : '🎬';
+        listText += `${num}. ${icon} <b>${escapeHtml(item.title)}</b> (${item.year}) [<i>${escapeHtml(item.type)}</i>]\n   👉 <a href="${baseUrl}/#/media/${groupKey}">View Status Page</a>\n\n`;
+        buttons.push([
+          { text: `❌ Remove "${item.title.slice(0, 20)}"`, callback_data: `delete_wl_${item.id}` }
+        ]);
+      });
+
+      const navRow: any[] = [];
+      if (page > 0) navRow.push({ text: '⬅️ Prev', callback_data: `menu_watchlist_${page - 1}` });
+      if (page < totalPages - 1) navRow.push({ text: 'Next ➡️', callback_data: `menu_watchlist_${page + 1}` });
+      if (navRow.length > 0) buttons.push(navRow);
+      
+      buttons.push([
+        { text: '🔍 Add New Title', callback_data: 'action_search_title' },
+        { text: '🔙 Back to Menu', callback_data: 'action_main_menu' }
+      ]);
+
+      if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+      bot.sendMessage(chatId, listText, {
+        parse_mode: 'HTML', disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buttons }
+      }).catch(() => {});
+    };
+
+    const handleRecentReleasesView = async (chatId: number, page: number = 0, messageId?: number) => {
+      const itemsPerPage = 4;
+      const items = await db.select().from(releases).orderBy(desc(releases.createdAt)).limit(20);
+      const totalPages = Math.ceil(items.length / itemsPerPage) || 1;
+      const pagedItems = items.slice(page * itemsPerPage, (page + 1) * itemsPerPage);
+      const baseUrl = await getBaseUrl();
+
+      if (items.length === 0) {
+        if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+        bot.sendMessage(chatId, '🎬 <b>No discovered releases yet.</b>\n\nTap "🔄 Force Scan Now" to check download indexers.', {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔄 Force Scan Now', callback_data: 'action_force_scan' }],
+              [{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      let relText = `<b>🎬 Discovered Releases (Page ${page + 1} of ${totalPages}):</b>\n\n`;
+      const buttons: any[] = [];
+
+      pagedItems.forEach((item, idx) => {
+        const num = (page * itemsPerPage) + idx + 1;
+        const groupKey = getGroupKey(item.title, item.type);
+        relText += `${num}. <b>${escapeHtml(item.title)}</b> (${item.year})\n   ↳ <i>${escapeHtml(item.releaseType)}</i>\n\n`;
+        
+        buttons.push([
+          { text: `🍿 View Qualities: ${item.title.slice(0, 24)}`, url: `${baseUrl}/#/media/${groupKey}` }
+        ]);
+      });
+
+      const navRow: any[] = [];
+      if (page > 0) navRow.push({ text: '⬅️ Prev', callback_data: `menu_recent_${page - 1}` });
+      if (page < totalPages - 1) navRow.push({ text: 'Next ➡️', callback_data: `menu_recent_${page + 1}` });
+      if (navRow.length > 0) buttons.push(navRow);
+      
+      buttons.push([{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]);
+
+      if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+      bot.sendMessage(chatId, relText, {
+        parse_mode: 'HTML', disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: buttons }
+      }).catch(() => {});
+    };
+
+    const handleForceScan = async (chatId: number, messageId?: number) => {
+      if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+      await bot.sendMessage(chatId, '<b>🔄 Force Scan Initiated...</b>\n\nChecking scene release indexers and TMDB digital radar for your tracked titles...', {
+        parse_mode: 'HTML'
+      });
+      try {
+        await runScan();
+        bot.sendMessage(chatId, '✅ <b>Scan Complete!</b> Check above for any newly discovered download or episode alerts.', {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' }],
+              [{ text: '🎬 Recent Releases', callback_data: 'menu_recent_0' }]
+            ]
+          }
+        });
+      } catch (e: any) {
+        bot.sendMessage(chatId, `❌ <b>Scan Error:</b> ${e.message}`, { parse_mode: 'HTML' });
+      }
+    };
+
+    // Welcome handler
+    bot.onText(/\/start|\/menu/, (msg: any) => {
+      bot.sendMessage(msg.chat.id, '✅ <b>Release Radar Connected!</b>\n\nTap <b>📋 Menu</b> below anytime to access controls.', {
+        parse_mode: 'HTML',
+        reply_markup: COLLAPSED_KEYBOARD
       }).then(() => {
         sendDashboard(msg.chat.id);
       });
     });
 
-    bot.onText(/\/menu/, (msg: any) => {
-      sendDashboard(msg.chat.id);
-    });
-
-    bot.onText(/\/scan/, async (msg: any) => {
-      const chatId = msg.chat.id;
-      bot.sendMessage(chatId, '<b>🔄 Manual Scan Started...</b>\n\nChecking scene release indexers and TMDB digital radar for your watchlist items.', { parse_mode: 'HTML' });
-      try {
-        await runScan();
-        bot.sendMessage(chatId, '✅ <b>Scan Complete!</b> Check above for new download or release notifications.', { parse_mode: 'HTML' });
-      } catch (e: any) {
-        bot.sendMessage(chatId, `❌ <b>Scan Error:</b> ${e.message}`, { parse_mode: 'HTML' });
-      }
-    });
-
-    bot.onText(/\/watchlist|\/wl/, async (msg: any) => {
-      const chatId = msg.chat.id;
-      const items = await db.select().from(watchlist).orderBy(desc(watchlist.createdAt));
-      if (items.length === 0) {
-        return bot.sendMessage(chatId, '📋 <b>Your Watchlist is currently empty.</b>\n\nSend <code>/add &lt;Movie or Show Name&gt;</code> to start tracking downloads!', { parse_mode: 'HTML' });
-      }
-      let text = `<b>📋 Your Watchlist (${items.length} items):</b>\n\n`;
-      items.forEach((item, idx) => {
-        text += `${idx + 1}. <b>${escapeHtml(item.title)}</b> (${item.year}) [<i>${escapeHtml(item.type)}</i>]\n`;
-      });
-      text += `\n<i>Tap '📋 Menu' to browse with interactive controls.</i>`;
-      bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
-    });
-
-    bot.onText(/\/releases/, async (msg: any) => {
-      const chatId = msg.chat.id;
-      const items = await db.select().from(releases).orderBy(desc(releases.createdAt)).limit(10);
-      if (items.length === 0) {
-        return bot.sendMessage(chatId, '🎬 <b>No releases discovered yet.</b> Run <code>/scan</code> to check providers.', { parse_mode: 'HTML' });
-      }
-      let text = `<b>🎬 Latest Discovered Releases:</b>\n\n`;
-      items.forEach((item, idx) => {
-        text += `${idx + 1}. <b>${escapeHtml(item.title)}</b> (${item.year})\n   ↳ <i>${escapeHtml(item.releaseType)}</i>\n\n`;
-      });
-      bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
-    });
-
-    bot.onText(/\/add (.+)/, async (msg: any, match: any) => {
-      const chatId = msg.chat.id;
-      const query = match && match[1] ? match[1].trim() : '';
-      if (!query) return;
-
-      try {
-        bot.sendMessage(chatId, `🔍 Searching for "<b>${escapeHtml(query)}</b>"...`, { parse_mode: 'HTML' });
-        const results = await searchMedia(query);
-        if (results.length === 0) {
-          return bot.sendMessage(chatId, `❌ No movies or TV series found for "${escapeHtml(query)}".`, { parse_mode: 'HTML' });
-        }
-        const top = results[0];
-        
-        // Add to watchlist
-        await db.insert(watchlist).values({
-          title: top.title,
-          year: top.year,
-          type: top.type,
-        }).onConflictDoNothing();
-
-        bot.sendMessage(chatId, `✅ <b>Added to Watchlist!</b>\n\n<b>Title:</b> ${escapeHtml(top.title)} (${top.year})\n<b>Type:</b> ${escapeHtml(top.type)}\n\n🔄 Checking download indexers now...`, { parse_mode: 'HTML' });
-        
-        // Run quick scan for this new addition
-        await runScan();
-      } catch (err: any) {
-        bot.sendMessage(chatId, `❌ Failed to add title: ${err.message}`, { parse_mode: 'HTML' });
-      }
-    });
-
-    bot.onText(/\/help/, (msg: any) => {
-      const text = `<b>🤖 Release Radar Bot Commands:</b>
-
-/start - Open welcome screen & menu
-/menu - Show interactive control dashboard
-/scan - Run an immediate scan for downloads
-/watchlist or /wl - Show all watchlist titles
-/releases - Show recent discovered releases
-/add &lt;title&gt; - Add a movie or TV show to track
-/ping - Test bot responsiveness`;
-      bot.sendMessage(msg.chat.id, text, { parse_mode: 'HTML' });
-    });
-
-    // Handle persistent keyboard button clicks
+    // Handle persistent keyboard button clicks & plain text input
     bot.on('message', async (msg: any) => {
       if (!msg.text) return;
-      if (msg.text === '📋 Menu') {
-        await sendDashboard(msg.chat.id);
-      } else if (msg.text === '🔄 Scan') {
-        const chatId = msg.chat.id;
-        bot.sendMessage(chatId, '<b>🔄 Scan Initiated...</b>', { parse_mode: 'HTML' });
-        try {
-          await runScan();
-          bot.sendMessage(chatId, '✅ <b>Scan Complete!</b> Check above for notifications.', { parse_mode: 'HTML' });
-        } catch (e: any) {
-          bot.sendMessage(chatId, `❌ Scan failed: ${e.message}`, { parse_mode: 'HTML' });
-        }
-      } else if (msg.text === '📋 Watchlist') {
-        const chatId = msg.chat.id;
-        const items = await db.select().from(watchlist).orderBy(desc(watchlist.createdAt));
-        if (items.length === 0) {
-          bot.sendMessage(chatId, '📋 <b>Watchlist is empty.</b> Use <code>/add &lt;name&gt;</code> to track titles.', { parse_mode: 'HTML' });
-        } else {
-          let text = `<b>📋 Your Watchlist (${items.length} items):</b>\n\n`;
-          items.forEach((item, idx) => {
-            text += `${idx + 1}. <b>${escapeHtml(item.title)}</b> (${item.year}) [<i>${escapeHtml(item.type)}</i>]\n`;
-          });
-          bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
-        }
+      const text = msg.text.trim();
+      const chatId = msg.chat.id;
+
+      // Check persistent bottom keyboard buttons
+      if (text === '📋 Menu' || text === 'Menu') {
+        bot.sendMessage(chatId, '📋 <b>Menu Controls:</b>\n\nSelect an option below or tap <b>✖️ Close Menu</b> to hide:', {
+          parse_mode: 'HTML',
+          reply_markup: EXPANDED_KEYBOARD
+        });
+      } else if (text === '✖️ Close Menu' || text === 'Close Menu') {
+        bot.sendMessage(chatId, '👌 <b>Menu collapsed.</b> Tap <b>📋 Menu</b> below anytime to open.', {
+          parse_mode: 'HTML',
+          reply_markup: COLLAPSED_KEYBOARD
+        });
+      } else if (text === '🔍 Search & Add') {
+        chatSearchActive.add(chatId);
+        bot.sendMessage(chatId, '🔍 <b>Search & Add to Radar</b>\n\nPlease type the title of the movie or TV show below:\n<i>(e.g., Severance, Slow Horses, Gladiator 2...)</i>', {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[{ text: '❌ Cancel Search', callback_data: 'action_cancel_search' }]]
+          }
+        });
+      } else if (text === '📋 Watchlist') {
+        await handleWatchlistView(chatId);
+      } else if (text === '🎬 Recent Releases') {
+        await handleRecentReleasesView(chatId);
+      } else if (text === '🔄 Scan Now') {
+        await handleForceScan(chatId);
+      } else if (text === '🍿 Main Dashboard') {
+        await sendDashboard(chatId);
+      } else if (text === '🌐 Web App') {
+        const baseUrl = await getBaseUrl();
+        bot.sendMessage(chatId, '🌐 <b>Open Web Application:</b>', {
+          reply_markup: {
+            inline_keyboard: [[{ text: '🍿 Open Web App', url: baseUrl }]]
+          }
+        });
+      } else if (text === '/start' || text === '/menu') {
+        // Handled by onText
+      } else {
+        // Any regular text typed by the admin is treated as a real-time title search!
+        await handleSearchQuery(chatId, text);
       }
     });
 
-    // CRITICAL: Callback query handler for inline buttons
+    // CRITICAL: Callback query handler for all inline buttons
     bot.on('callback_query', async (query: any) => {
-      // ALWAYS answer callback query immediately to stop the button loading spinner!
       try {
         await bot.answerCallbackQuery(query.id).catch(() => {});
       } catch (e) {}
@@ -292,54 +423,65 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       if (data === 'action_main_menu') {
         await sendDashboard(chatId, messageId);
       } 
-      else if (data === 'action_how_to_add') {
-        const text = `<b>➕ How to Add Movies & Series:</b>
-
-1. In Telegram chat: Send <code>/add Title</code>
-   <i>Example:</i> <code>/add Gladiator 2</code> or <code>/add Severance</code>
-2. In Web App: Click <b>Watchlist</b> ➔ <b>Add Movie/Series</b>
-
-The bot will automatically check download indexers and alert you the second it's released!`;
-        bot.sendMessage(chatId, text, {
+      else if (data === 'action_search_title') {
+        chatSearchActive.add(chatId);
+        if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+        bot.sendMessage(chatId, '🔍 <b>Search & Add to Radar</b>\n\nPlease type the title of the movie or TV show below:\n<i>(e.g., Severance, Slow Horses, Gladiator 2, Dune...)</i>', {
           parse_mode: 'HTML',
           reply_markup: {
-            inline_keyboard: [[{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]]
+            inline_keyboard: [[{ text: '❌ Cancel Search', callback_data: 'action_cancel_search' }]]
           }
         });
+      }
+      else if (data === 'action_cancel_search') {
+        chatSearchActive.delete(chatId);
+        await sendDashboard(chatId, messageId);
+      }
+      else if (data.startsWith('add_tmdb_')) {
+        const idx = parseInt(data.replace('add_tmdb_', ''), 10);
+        const results = chatSearchResults.get(chatId) || [];
+        const item = results[idx];
+
+        if (!item) {
+          return bot.sendMessage(chatId, '❌ Search session expired. Please tap "🔍 Search & Add" again.', {
+            reply_markup: {
+              inline_keyboard: [[{ text: '🔍 Search & Add', callback_data: 'action_search_title' }]]
+            }
+          });
+        }
+
+        try {
+          // Save item to database
+          await db.insert(watchlist).values({
+            title: item.title,
+            year: item.year,
+            type: item.type,
+          }).onConflictDoNothing();
+
+          if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+
+          const isTV = item.type === 'Series';
+          const icon = isTV ? '📺' : '🎬';
+
+          await bot.sendMessage(chatId, `✅ <b>Added to Radar!</b>\n\n${icon} <b>${escapeHtml(item.title)}</b> (${item.year}) [<i>${escapeHtml(item.type)}</i>]\n\n🟢 Radar will now monitor scene release indexers for this specific title.\n🔄 Checking download indexers now...`, {
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' }],
+                [{ text: '🔍 Search Another Title', callback_data: 'action_search_title' }],
+                [{ text: '🔙 Back to Dashboard', callback_data: 'action_main_menu' }]
+              ]
+            }
+          });
+
+          // Trigger immediate scan for this new addition
+          runScan().catch(() => {});
+        } catch (addErr: any) {
+          bot.sendMessage(chatId, `❌ Failed to add title: ${addErr.message}`, { parse_mode: 'HTML' });
+        }
       }
       else if (data === 'action_force_scan') {
-        bot.deleteMessage(chatId, messageId).catch(() => {});
-        await bot.sendMessage(chatId, '<b>🔄 Force Scan Initiated...</b>\n\nChecking scene release indexers and TMDB digital radar. You will receive notifications if any new downloads or premiere updates are found.', {
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [[{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]]
-          }
-        });
-        try {
-          await runScan();
-          bot.sendMessage(chatId, '✅ <b>Scan Complete!</b> Check above for any new release alerts.', { parse_mode: 'HTML' });
-        } catch(e: any) {
-          bot.sendMessage(chatId, `❌ <b>Scan Failed:</b> ${e.message}`, { parse_mode: 'HTML' });
-        }
-      }
-      else if (data.startsWith('send_magnet_')) {
-        const releaseId = parseInt(data.replace('send_magnet_', ''), 10);
-        try {
-          const rels = await db.select().from(releases).where(eq(releases.id, releaseId)).limit(1);
-          if (rels.length > 0 && rels[0].sourceUrl) {
-            const rel = rels[0];
-            const isMagnet = rel.sourceUrl.startsWith('magnet:');
-            if (isMagnet) {
-              await bot.sendMessage(chatId, `🧲 <b>Magnet Link for ${escapeHtml(rel.title)}:</b>\n\n<code>${rel.sourceUrl}</code>\n\n<i>Tap the code above to copy it with one click!</i>`, { parse_mode: 'HTML' });
-            } else {
-              await bot.sendMessage(chatId, `🔗 <b>Source Link for ${escapeHtml(rel.title)}:</b>\n\n<a href="${rel.sourceUrl}">${rel.sourceUrl}</a>`, { parse_mode: 'HTML' });
-            }
-          } else {
-            bot.sendMessage(chatId, '❌ Release link not found or expired.', { parse_mode: 'HTML' });
-          }
-        } catch (e: any) {
-          bot.sendMessage(chatId, `❌ Error retrieving magnet: ${e.message}`, { parse_mode: 'HTML' });
-        }
+        await handleForceScan(chatId, messageId);
       }
       else if (data.startsWith('delete_wl_')) {
         const wlId = parseInt(data.replace('delete_wl_', ''), 10);
@@ -348,7 +490,7 @@ The bot will automatically check download indexers and alert you the second it's
           if (item.length > 0) {
             await db.delete(watchlist).where(eq(watchlist.id, wlId));
             bot.sendMessage(chatId, `🗑️ Removed "<b>${escapeHtml(item[0].title)}</b>" from your Watchlist.`, { parse_mode: 'HTML' });
-            await sendDashboard(chatId);
+            await handleWatchlistView(chatId, 0, messageId);
           }
         } catch (delErr: any) {
           bot.sendMessage(chatId, `❌ Failed to remove item: ${delErr.message}`, { parse_mode: 'HTML' });
@@ -356,109 +498,12 @@ The bot will automatically check download indexers and alert you the second it's
       }
       else if (data.startsWith('menu_watchlist_')) {
         const page = parseInt(data.split('_')[2]) || 0;
-        const itemsPerPage = 4;
-        const items = await db.select().from(watchlist).orderBy(desc(watchlist.createdAt));
-        const totalPages = Math.ceil(items.length / itemsPerPage) || 1;
-        const pagedItems = items.slice(page * itemsPerPage, (page + 1) * itemsPerPage);
-        const baseUrl = await getBaseUrl();
-
-        if (items.length === 0) {
-          bot.deleteMessage(chatId, messageId).catch(() => {});
-          bot.sendMessage(chatId, '📋 <b>Your Watchlist is currently empty.</b>\n\nUse <code>/add &lt;Title&gt;</code> to start tracking movies or TV series!', {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '➕ Manage Watchlist on Web', url: `${baseUrl}/#/watchlist` }],
-                [{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]
-              ]
-            }
-          });
-          return;
-        }
-
-        let listText = `<b>📋 Your Watchlist (Page ${page + 1} of ${totalPages}):</b>\n\n`;
-        const buttons: any[] = [];
-
-        pagedItems.forEach((item, idx) => {
-          const num = (page * itemsPerPage) + idx + 1;
-          const groupKey = getGroupKey(item.title, item.type);
-          listText += `${num}. <b>${escapeHtml(item.title)}</b> (${item.year}) [<i>${escapeHtml(item.type)}</i>]\n   👉 <a href="${baseUrl}/#/media/${groupKey}">View Status Page</a>\n\n`;
-          buttons.push([
-            { text: `❌ Remove "${item.title.slice(0, 20)}"`, callback_data: `delete_wl_${item.id}` }
-          ]);
-        });
-
-        const navRow: any[] = [];
-        if (page > 0) navRow.push({ text: '⬅️ Prev', callback_data: `menu_watchlist_${page - 1}` });
-        if (page < totalPages - 1) navRow.push({ text: 'Next ➡️', callback_data: `menu_watchlist_${page + 1}` });
-        if (navRow.length > 0) buttons.push(navRow);
-        
-        buttons.push([{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]);
-
-        bot.deleteMessage(chatId, messageId).catch(() => {});
-        bot.sendMessage(chatId, listText, {
-          parse_mode: 'HTML', disable_web_page_preview: true,
-          reply_markup: { inline_keyboard: buttons }
-        }).catch(() => {});
+        await handleWatchlistView(chatId, page, messageId);
       }
       else if (data.startsWith('menu_recent_')) {
         const page = parseInt(data.split('_')[2]) || 0;
-        const itemsPerPage = 4;
-        const items = await db.select().from(releases).orderBy(desc(releases.createdAt)).limit(20);
-        const totalPages = Math.ceil(items.length / itemsPerPage) || 1;
-        const pagedItems = items.slice(page * itemsPerPage, (page + 1) * itemsPerPage);
-        const baseUrl = await getBaseUrl();
-
-        if (items.length === 0) {
-          bot.deleteMessage(chatId, messageId).catch(() => {});
-          bot.sendMessage(chatId, '🎬 <b>No discovered releases yet.</b>\n\nRun <code>/scan</code> to check download indexers.', {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]
-              ]
-            }
-          });
-          return;
-        }
-
-        let relText = `<b>🎬 Discovered Releases (Page ${page + 1} of ${totalPages}):</b>\n\n`;
-        const buttons: any[] = [];
-
-        pagedItems.forEach((item, idx) => {
-          const num = (page * itemsPerPage) + idx + 1;
-          const groupKey = getGroupKey(item.title, item.type);
-          relText += `${num}. <b>${escapeHtml(item.title)}</b> (${item.year})\n   ↳ <i>${escapeHtml(item.releaseType)}</i>\n\n`;
-          
-          if (item.sourceUrl?.startsWith('magnet:')) {
-            buttons.push([
-              { text: `🧲 Magnet: ${item.title.slice(0, 16)}`, callback_data: `send_magnet_${item.id}` },
-              { text: '🍿 Details', url: `${baseUrl}/#/media/${groupKey}` }
-            ]);
-          } else {
-            buttons.push([
-              { text: `🍿 View ${item.title.slice(0, 20)}`, url: `${baseUrl}/#/media/${groupKey}` }
-            ]);
-          }
-        });
-
-        const navRow: any[] = [];
-        if (page > 0) navRow.push({ text: '⬅️ Prev', callback_data: `menu_recent_${page - 1}` });
-        if (page < totalPages - 1) navRow.push({ text: 'Next ➡️', callback_data: `menu_recent_${page + 1}` });
-        if (navRow.length > 0) buttons.push(navRow);
-        
-        buttons.push([{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]);
-
-        bot.deleteMessage(chatId, messageId).catch(() => {});
-        bot.sendMessage(chatId, relText, {
-          parse_mode: 'HTML', disable_web_page_preview: true,
-          reply_markup: { inline_keyboard: buttons }
-        }).catch(() => {});
+        await handleRecentReleasesView(chatId, page, messageId);
       }
-    });
-
-    bot.onText(/\/ping/, (msg: any) => {
-      bot?.sendMessage(msg.chat.id, '<b>Pong!</b> ⚡ Release Radar Bot is online and polling.', { parse_mode: 'HTML' });
     });
 
     console.log(`Telegram bot initialized via Long Polling (@${botUser.username}).`);
@@ -476,41 +521,59 @@ export async function sendTelegramNotification(item: ReleaseItem) {
     const settings = await getSettings();
     const targetChatId = settings?.telegramChatId || process.env.TELEGRAM_CHAT_ID;
     if (bot && targetChatId) {
+      const canonicalTitle = normalizeMediaTitle(item.title);
       const groupKey = getGroupKey(item.title, item.type);
       const baseUrl = await getBaseUrl(settings);
       const detailUrl = `${baseUrl}/#/media/${groupKey}`;
 
-      const yearSuffix = item.title.includes(String(item.year)) ? '' : ` (${item.year})`;
+      const yearSuffix = item.year ? ` (${item.year})` : '';
+      const isTV = item.type?.toLowerCase() === 'series' || item.type?.toLowerCase() === 'anime';
       const isDownload = item.releaseType.includes('Download Available') || item.sourceUrl?.startsWith('magnet:');
-      
-      const headerTitle = isDownload 
-        ? `🔥 <b>NOW AVAILABLE TO DOWNLOAD!</b>`
-        : `🎬 <b>Premiere & Release Alert!</b>`;
+      const epCode = extractEpisodeOrPack(item.title) || extractEpisodeOrPack(item.releaseType);
 
-      const caption = `${headerTitle}
+      let headerTitle: string;
+      let bodyText: string;
 
-<b>Title:</b> ${escapeHtml(item.title)}${yearSuffix}
-<b>Type:</b> ${escapeHtml(item.type)}
-<b>Status:</b> ${escapeHtml(item.releaseType)}
-<b>Provider:</b> ${escapeHtml(item.provider || 'Download Availability Radar')}
+      if (isTV && epCode) {
+        headerTitle = `🔥 <b>NEW EPISODE AVAILABLE!</b>`;
+        bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+⚡ <b>Episode:</b> <code>${escapeHtml(epCode)}</code>
+🟢 <b>Status:</b> Ready to download on the web app
 
-🍿 <b>View Details & Download Options:</b>
+🍿 <b>All Available Qualities (4K, 1080p, 720p):</b>
 <a href="${detailUrl}">${detailUrl}</a>`;
+      } else if (isTV) {
+        headerTitle = `🔥 <b>NEW SHOW EPISODE AVAILABLE!</b>`;
+        bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+🟢 <b>Status:</b> Ready to download on the web app
 
-      const inlineKeyboard: any[] = [];
-      const row1: any[] = [];
+🍿 <b>All Available Qualities & Episodes:</b>
+<a href="${detailUrl}">${detailUrl}</a>`;
+      } else if (isDownload) {
+        headerTitle = `🎬 <b>NEW MOVIE NOW AVAILABLE!</b>`;
+        bodyText = `🍿 <b>Movie:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+🟢 <b>Status:</b> Ready to download on the web app
 
-      if (item.sourceUrl?.startsWith('magnet:')) {
-        row1.push({ text: '🧲 Copy Magnet Link', callback_data: `send_magnet_${item.id || 0}` });
+👉 <b>All Available Qualities (4K, 1080p, 720p):</b>
+<a href="${detailUrl}">${detailUrl}</a>`;
+      } else {
+        headerTitle = `🎬 <b>Premiere & Release Alert!</b>`;
+        bodyText = `<b>Title:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+<b>Status:</b> ${escapeHtml(item.releaseType)}
+
+👉 <a href="${detailUrl}">${detailUrl}</a>`;
       }
-      row1.push({ text: '🍿 Open Web Details', url: detailUrl });
-      inlineKeyboard.push(row1);
 
-      // Interactive quick actions
-      inlineKeyboard.push([
-        { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' },
-        { text: '🔄 Scan Now', callback_data: 'action_force_scan' }
-      ]);
+      const caption = `${headerTitle}\n\n${bodyText}`;
+
+      // Clean interactive buttons: No torrent magnet sent on telegram, only direct web app button & quick actions
+      const inlineKeyboard: any[] = [
+        [{ text: '🍿 Open Qualities & Download', url: detailUrl }],
+        [
+          { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' },
+          { text: '🔄 Scan Now', callback_data: 'action_force_scan' }
+        ]
+      ];
 
       const options: any = {
         parse_mode: 'HTML',

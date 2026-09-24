@@ -7,7 +7,7 @@ import { logInfo, logError, logWarning, logSuccess, logDebug } from './logger';
 import { Provider } from '../types';
 import { getStandardizedMatchKey, normalizeMediaTitle } from '../utils/mediaGrouper';
 import { generateCustomPoster } from '../utils/posterGenerator';
-import { DownloadRadarProvider } from '../providers/downloadRadarProvider';
+import { DownloadRadarProvider, extractEpisodeOrPack } from '../providers/downloadRadarProvider';
 import { TMDBPremiereProvider } from '../providers/tmdbProvider';
 
 let isScanning = false;
@@ -102,15 +102,15 @@ export async function runScan() {
     const existingReleases = await db.select().from(releases);
     const notificationsToSend: any[] = [];
 
-    // Process each watchlist item individually to ensure exactly ONE consolidated card per title
+    // Process each watchlist item to discover and store all available qualities and episodes
     for (const wl of items) {
       const normWlTitle = normalizeMediaTitle(wl.title).toLowerCase().replace(/[^a-z0-9]/g, '');
       const isTV = wl.type?.toLowerCase() === 'series' || wl.type?.toLowerCase() === 'anime';
 
-      // Check if a download is available for this title
-      const dlItem = downloadItems.find(d => {
+      // Find all download releases for this title across qualities and episodes
+      const matchingDlItems = downloadItems.filter(d => {
         const normDTitle = normalizeMediaTitle(d.title).toLowerCase().replace(/[^a-z0-9]/g, '');
-        return normDTitle === normWlTitle || normDTitle.includes(normWlTitle) || normWlTitle.includes(normDTitle);
+        return normDTitle === normWlTitle || normDTitle.startsWith(normWlTitle) || normWlTitle.startsWith(normDTitle);
       });
 
       // Check TMDB premiere / streaming status
@@ -128,7 +128,7 @@ export async function runScan() {
         metadata = {
           poster: posterUrl,
           overview: `Monitored watchlist item: ${wl.title} (${wl.year})`,
-          sourceUrl: dlItem?.sourceUrl || tmdbItem?.sourceUrl || '',
+          sourceUrl: matchingDlItems[0]?.sourceUrl || tmdbItem?.sourceUrl || '',
         };
       }
       if (!posterUrl) {
@@ -136,75 +136,132 @@ export async function runScan() {
           title: wl.title,
           year: wl.year,
           type: wl.type,
-          releaseType: dlItem?.releaseType || tmdbItem?.releaseType || 'Monitored',
-          sourceUrl: dlItem?.sourceUrl || tmdbItem?.sourceUrl || '',
-          provider: dlItem ? 'Download Radar' : 'TMDB Radar',
+          releaseType: matchingDlItems[0]?.releaseType || tmdbItem?.releaseType || 'Monitored',
+          sourceUrl: matchingDlItems[0]?.sourceUrl || tmdbItem?.sourceUrl || '',
+          provider: matchingDlItems.length > 0 ? 'Download Radar' : 'TMDB Radar',
         });
         metadata.poster = posterUrl;
       }
 
-      // Determine final status, sourceUrl, provider, and seeders
-      let finalStatus: string;
-      let finalSourceUrl: string;
-      let finalProvider: string;
-      let finalSeeders = 0;
-      let finalLeechers = 0;
+      if (matchingDlItems.length > 0) {
+        // Track which episodes or releases were ALREADY in the database before this scan
+        const knownEpisodes = new Set<string>();
+        let movieAlreadySaved = false;
 
-      if (dlItem) {
-        finalStatus = dlItem.releaseType;
-        finalSourceUrl = dlItem.sourceUrl;
-        finalProvider = 'Download Availability Radar';
-        finalSeeders = dlItem.seeders || 0;
-        finalLeechers = dlItem.leechers || 0;
-      } else if (tmdbItem) {
-        finalStatus = tmdbItem.releaseType;
-        finalSourceUrl = tmdbItem.sourceUrl;
-        finalProvider = 'TMDB Premiere Radar';
+        for (const r of existingReleases) {
+          const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+          const isMatch = normWlTitle === normRTitle || normWlTitle.startsWith(normRTitle) || normRTitle.startsWith(normWlTitle);
+          if (isMatch && (r.sourceUrl?.startsWith('magnet:') || r.releaseType?.includes('Download Available'))) {
+            if (isTV) {
+              const ep = extractEpisodeOrPack(r.title) || extractEpisodeOrPack(r.releaseType);
+              if (ep) {
+                knownEpisodes.add(ep.toUpperCase());
+              }
+            } else {
+              movieAlreadySaved = true;
+            }
+          }
+        }
+
+        // Remove any old non-download placeholder cards for this title
+        const placeholderCards = existingReleases.filter(r => {
+          const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+          const isMatch = normWlTitle === normRTitle || normWlTitle.startsWith(normRTitle) || normRTitle.startsWith(normWlTitle);
+          return isMatch && !r.sourceUrl?.startsWith('magnet:') && !r.releaseType?.includes('Download Available');
+        });
+
+        for (const ph of placeholderCards) {
+          await db.delete(releases).where(eq(releases.id, ph.id));
+          const idx = existingReleases.findIndex(r => r.id === ph.id);
+          if (idx !== -1) existingReleases.splice(idx, 1);
+        }
+
+        const newEpisodeNotifications: any[] = [];
+        let newlyDiscoveredCount = 0;
+
+        for (const dl of matchingDlItems) {
+          // Check if this specific release already exists in database
+          const existingRelease = existingReleases.find(r => r.sourceUrl === dl.sourceUrl || r.title === dl.title);
+
+          if (existingRelease) {
+            // Update stats
+            await db.update(releases).set({
+              releaseType: dl.releaseType,
+              seeders: dl.seeders || 0,
+              leechers: dl.leechers || 0,
+              poster: posterUrl,
+              metadataJson: metadata,
+            }).where(eq(releases.id, existingRelease.id));
+
+            existingRelease.releaseType = dl.releaseType;
+            existingRelease.seeders = dl.seeders;
+            existingRelease.leechers = dl.leechers;
+          } else {
+            // Insert newly discovered quality / release into DB so admin can view all qualities on web app
+            const [inserted] = await db.insert(releases).values({
+              title: dl.title,
+              year: wl.year,
+              type: wl.type,
+              provider: 'Download Availability Radar',
+              sourceUrl: dl.sourceUrl,
+              releaseType: dl.releaseType,
+              seeders: dl.seeders || 0,
+              leechers: dl.leechers || 0,
+              poster: posterUrl,
+              metadataJson: metadata,
+            }).returning();
+
+            if (inserted) {
+              existingReleases.push(inserted);
+              newlyDiscoveredCount++;
+
+              // STRICT ONE-TIME NOTIFICATION CHECK:
+              // 1. For TV shows: only notify when a brand-new episode drops. Skip if this episode was already saved before!
+              // 2. For movies: only notify once when the movie first becomes downloadable. Skip when other qualities are added!
+              if (isTV) {
+                const ep = extractEpisodeOrPack(dl.title) || extractEpisodeOrPack(dl.releaseType);
+                const epKey = (ep || 'GENERAL').toUpperCase();
+                if (!knownEpisodes.has(epKey)) {
+                  // Brand new episode discovered!
+                  knownEpisodes.add(epKey);
+                  newEpisodeNotifications.push(inserted);
+                  await logSuccess(`🔥 Brand new episode dropped: ${wl.title} ${epKey}`, 'DownloadRadar');
+                }
+              } else {
+                if (!movieAlreadySaved) {
+                  movieAlreadySaved = true;
+                  newEpisodeNotifications.push(inserted);
+                  await logSuccess(`🔥 Movie newly available: ${wl.title}`, 'DownloadRadar');
+                }
+              }
+            }
+          }
+        }
+
+        if (newlyDiscoveredCount > 0) {
+          await logInfo(`Saved ${newlyDiscoveredCount} new quality release(s) for "${wl.title}" to database`, 'DownloadRadar');
+        }
+
+        // Queue notifications for newly discovered episodes only
+        if (newEpisodeNotifications.length > 0) {
+          for (const itemToNotify of newEpisodeNotifications) {
+            notificationsToSend.push(itemToNotify);
+          }
+        }
       } else {
-        finalStatus = `⏳ Monitoring release schedule`;
-        finalSourceUrl = metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`;
-        finalProvider = 'Release Radar';
-      }
+        // No downloads available yet: keep a single status / scheduled release card
+        const finalStatus = tmdbItem ? tmdbItem.releaseType : `⏳ Monitoring release schedule`;
+        const finalSourceUrl = tmdbItem ? tmdbItem.sourceUrl : (metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`);
+        const finalProvider = tmdbItem ? 'TMDB Premiere Radar' : 'Release Radar';
 
-      // Find existing card in database
-      const existingCard = existingReleases.find(r => {
-        const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
-        const isRTV = r.type?.toLowerCase() === 'series' || r.type?.toLowerCase() === 'anime';
-        const sameType = isTV === isRTV;
-        const titleMatch = normWlTitle === normRTitle || normWlTitle.startsWith(normRTitle) || normRTitle.startsWith(normWlTitle);
-        return titleMatch && sameType;
-      });
+        const existingCard = existingReleases.find(r => {
+          const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+          return normWlTitle === normRTitle || normWlTitle.startsWith(normRTitle) || normRTitle.startsWith(normWlTitle);
+        });
 
-      if (existingCard) {
-        // Did status transition to Download Available, or did episode/link change?
-        const isNowDownload = finalStatus.includes('Download Available');
-        const wasDownload = existingCard.releaseType.includes('Download Available');
-        const statusChanged = existingCard.releaseType !== finalStatus || existingCard.sourceUrl !== finalSourceUrl;
-        const becameDownloadable = isNowDownload && !wasDownload;
-
-        await db.update(releases).set({
-          title: wl.title,
-          year: wl.year,
-          type: wl.type,
-          provider: finalProvider,
-          sourceUrl: finalSourceUrl,
-          releaseType: finalStatus,
-          poster: posterUrl,
-          metadataJson: metadata,
-          seeders: finalSeeders,
-          leechers: finalLeechers,
-        }).where(eq(releases.id, existingCard.id));
-
-        // Update in-memory reference
-        existingCard.releaseType = finalStatus;
-        existingCard.sourceUrl = finalSourceUrl;
-        existingCard.poster = posterUrl;
-        existingCard.metadataJson = metadata;
-
-        if (becameDownloadable || (statusChanged && isNowDownload)) {
-          await logSuccess(`🔥 Download alert ready: ${wl.title} [${finalStatus}]`, 'DownloadRadar');
-          notificationsToSend.push({
-            id: existingCard.id,
+        if (existingCard) {
+          const statusChanged = existingCard.releaseType !== finalStatus;
+          await db.update(releases).set({
             title: wl.title,
             year: wl.year,
             type: wl.type,
@@ -213,29 +270,31 @@ export async function runScan() {
             releaseType: finalStatus,
             poster: posterUrl,
             metadataJson: metadata,
-          });
-        } else if (statusChanged) {
-          await logInfo(`Updated release card: ${wl.title} [${finalStatus}]`, 'Scanner');
-        }
-      } else {
-        // Insert new card for this title
-        const [inserted] = await db.insert(releases).values({
-          title: wl.title,
-          year: wl.year,
-          type: wl.type,
-          provider: finalProvider,
-          sourceUrl: finalSourceUrl,
-          releaseType: finalStatus,
-          seeders: finalSeeders,
-          leechers: finalLeechers,
-          poster: posterUrl,
-          metadataJson: metadata,
-        }).returning();
+          }).where(eq(releases.id, existingCard.id));
 
-        if (inserted) {
-          existingReleases.push(inserted);
-          await logSuccess(`Created release card: ${wl.title} [${finalStatus}]`, 'Matcher');
-          notificationsToSend.push(inserted);
+          existingCard.releaseType = finalStatus;
+          existingCard.sourceUrl = finalSourceUrl;
+          if (statusChanged && tmdbItem) {
+            notificationsToSend.push(existingCard);
+          }
+        } else {
+          const [inserted] = await db.insert(releases).values({
+            title: wl.title,
+            year: wl.year,
+            type: wl.type,
+            provider: finalProvider,
+            sourceUrl: finalSourceUrl,
+            releaseType: finalStatus,
+            poster: posterUrl,
+            metadataJson: metadata,
+          }).returning();
+
+          if (inserted) {
+            existingReleases.push(inserted);
+            if (tmdbItem) {
+              notificationsToSend.push(inserted);
+            }
+          }
         }
       }
     }

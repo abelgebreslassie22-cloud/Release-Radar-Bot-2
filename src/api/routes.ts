@@ -4,11 +4,26 @@ import { watchlist, releases } from '../database/schema';
 import { getSettings, updateSettings } from '../services/settings';
 import { restartScheduler } from '../scheduler/cron';
 import { eq, desc, count, inArray } from 'drizzle-orm';
+import { searchMedia } from '../metadata/tmdb';
 
 export function setupRoutes(app: Express) {
   // Health check for Render
   app.get('/health', (req: Request, res: Response) => {
     res.status(200).send('OK');
+  });
+
+  // Media Search via TMDB for real-time picker
+  app.get('/api/media/search', async (req: Request, res: Response) => {
+    try {
+      const query = (req.query.query as string || '').trim();
+      if (!query) {
+        return res.json([]);
+      }
+      const results = await searchMedia(query);
+      res.json(results);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || 'Failed to search media' });
+    }
   });
 
   // Watchlist

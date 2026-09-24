@@ -83,7 +83,9 @@ export interface MediaSearchResult {
   year: number;
   type: string;
   poster?: string;
+  backdrop?: string;
   overview?: string;
+  voteAverage?: number;
 }
 
 export async function searchMedia(query: string): Promise<MediaSearchResult[]> {
@@ -107,20 +109,26 @@ export async function searchMedia(query: string): Promise<MediaSearchResult[]> {
       timeout: 5000,
     });
 
-    const results = (res.data?.results || []).filter((r: any) => r.media_type === 'movie' || r.media_type === 'tv');
+    const rawResults = (res.data?.results || []).filter((r: any) => r.media_type === 'movie' || r.media_type === 'tv');
     
-    return results.map((r: any) => {
+    // Sort by popularity descending so most prominent titles appear first
+    rawResults.sort((a: any, b: any) => (b.popularity || 0) - (a.popularity || 0));
+
+    return rawResults.slice(0, 10).map((r: any) => {
       const isTV = r.media_type === 'tv';
       const rawDate = isTV ? r.first_air_date : r.release_date;
       const parsedYear = rawDate ? new Date(rawDate).getFullYear() : new Date().getFullYear();
       const poster = r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : undefined;
+      const backdrop = r.backdrop_path ? `https://image.tmdb.org/t/p/w780${r.backdrop_path}` : undefined;
 
       return {
         title: isTV ? (r.name || r.original_name) : (r.title || r.original_title),
         year: parsedYear || new Date().getFullYear(),
         type: isTV ? 'Series' : 'Movie',
         poster,
+        backdrop,
         overview: r.overview,
+        voteAverage: r.vote_average ? Number(r.vote_average.toFixed(1)) : undefined,
       };
     });
   } catch (error) {

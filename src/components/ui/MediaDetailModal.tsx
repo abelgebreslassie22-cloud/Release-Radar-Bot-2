@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   X, Star, Calendar, Clock, Film, ExternalLink, Copy, Check, 
-  Layers, Globe, Search, Tv, User, Video, ShieldCheck 
+  Layers, Globe, Search, Tv, User, Video, ShieldCheck, Zap 
 } from 'lucide-react';
 import { MediaGroup, ReleaseItem } from '../../utils/mediaGrouper';
 import { Badge } from './Badge';
@@ -273,6 +273,7 @@ export function MediaDetailModal({ group, onClose }: MediaDetailModalProps) {
 
               <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
                 {group.releases.map((rel) => {
+                  const isMagnetUrl = rel.sourceUrl && rel.sourceUrl.startsWith('magnet:');
                   const isHttpUrl = rel.sourceUrl && (rel.sourceUrl.startsWith('http://') || rel.sourceUrl.startsWith('https://'));
                   return (
                     <div 
@@ -296,6 +297,37 @@ export function MediaDetailModal({ group, onClose }: MediaDetailModalProps) {
                           {rel.title}
                         </p>
                       </div>
+
+                      {isMagnetUrl && (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => handleCopyLink(rel)}
+                            className="p-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded-lg border border-emerald-200 transition-colors text-xs flex items-center gap-1 font-medium"
+                            title="Copy Magnet Link"
+                          >
+                            {copiedId === rel.id ? (
+                              <>
+                                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                <span className="text-emerald-700 font-semibold">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3.5 h-3.5" />
+                                <span>Copy Magnet</span>
+                              </>
+                            )}
+                          </button>
+
+                          <a
+                            href={rel.sourceUrl}
+                            className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                            title="Open in Torrent Client"
+                          >
+                            <Zap className="w-3.5 h-3.5" />
+                            <span>Open Magnet</span>
+                          </a>
+                        </div>
+                      )}
 
                       {isHttpUrl && (
                         <div className="flex items-center gap-2 shrink-0">
