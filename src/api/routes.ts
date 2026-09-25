@@ -5,11 +5,17 @@ import { getSettings, updateSettings } from '../services/settings';
 import { restartScheduler } from '../scheduler/cron';
 import { eq, desc, count, inArray } from 'drizzle-orm';
 import { searchMedia } from '../metadata/tmdb';
+import { runScan, syncWatchlistItemImmediately } from '../services/scanner';
 
 export function setupRoutes(app: Express) {
-  // Health check for Render
-  app.get('/health', (req: Request, res: Response) => {
-    res.status(200).send('OK');
+  // Health check for Render & external monitoring
+  app.get(['/health', '/api/health', '/api/ping'], (req: Request, res: Response) => {
+    res.status(200).json({
+      status: 'ok',
+      service: 'Release Radar',
+      uptime: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString()
+    });
   });
 
   // Media Search via TMDB for real-time picker
@@ -44,6 +50,16 @@ export function setupRoutes(app: Express) {
         return res.status(400).json({ error: 'Missing or invalid required fields: title, year, type' });
       }
       await db.insert(watchlist).values({ title, year: parsedYear, type });
+
+      // THE MOMENT IT IS ADDED: Search indexers right there and create card with all qualities and zero notifications
+      (async () => {
+        try {
+          await syncWatchlistItemImmediately({ title, year: parsedYear, type });
+        } catch (cardErr) {
+          console.error('Error auto-creating release card upon watchlist addition:', cardErr);
+        }
+      })();
+
       res.status(201).json({ success: true });
     } catch (e: any) { 
       if (e.code === '23505' || e.message?.includes('unique') || e.message?.includes('duplicate')) {
@@ -81,7 +97,12 @@ export function setupRoutes(app: Express) {
       const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) return res.status(400).json({ error: 'Invalid ID' });
 
-      await db.delete(watchlist).where(eq(watchlist.id, id));
+      const item = await db.select().from(watchlist).where(eq(watchlist.id, id)).limit(1);
+      if (item.length > 0) {
+        await db.delete(watchlist).where(eq(watchlist.id, id));
+        // Also remove the corresponding single card for this title
+        await db.delete(releases).where(eq(releases.title, item[0].title));
+      }
       res.json({ success: true });
     } catch (e: any) { res.status(500).json({ error: e.message || 'Failed to delete item' }); }
   });
@@ -98,7 +119,32 @@ export function setupRoutes(app: Express) {
     try {
       const id = parseInt(req.params.id as string, 10);
       if (isNaN(id)) return res.status(400).json({ error: 'Invalid release ID' });
-      await db.delete(releases).where(eq(releases.id, id));
+
+      // First check if id matches a card directly
+      const directCard = await db.select().from(releases).where(eq(releases.id, id)).limit(1);
+      if (directCard.length > 0) {
+        await db.delete(releases).where(eq(releases.id, id));
+        return res.json({ success: true });
+      }
+
+      // If not, check if id is a download item inside a card's metadataJson.downloads
+      const allCards = await db.select().from(releases);
+      let foundAndUpdated = false;
+      for (const card of allCards) {
+        const dls = Array.isArray((card.metadataJson as any)?.downloads) ? (card.metadataJson as any).downloads : [];
+        const filtered = dls.filter((d: any) => d.id !== id);
+        if (filtered.length !== dls.length) {
+          await db.update(releases).set({
+            metadataJson: {
+              ...(card.metadataJson as any || {}),
+              downloads: filtered
+            }
+          }).where(eq(releases.id, card.id));
+          foundAndUpdated = true;
+          break;
+        }
+      }
+
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message || 'Failed to delete release' });

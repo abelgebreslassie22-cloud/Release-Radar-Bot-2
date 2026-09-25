@@ -11,7 +11,7 @@ import { extractEpisodeOrPack } from '../providers/downloadRadarProvider';
 import { db } from '../database/db';
 import { watchlist, releases } from '../database/schema';
 import { desc, eq } from 'drizzle-orm';
-import { runScan } from '../services/scanner';
+import { runScan, syncWatchlistItemImmediately } from '../services/scanner';
 import { searchMedia } from '../metadata/tmdb';
 
 let bot: any = null;
@@ -101,7 +101,8 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
     });
 
     try {
-      bot.deleteMyCommands().catch(() => {});
+      await bot.deleteMyCommands();
+      console.log('Cleared all Telegram bot commands. Interface is strictly button-driven.');
     } catch (e) {}
 
     const chatSearchResults = new Map<number, any[]>();
@@ -109,7 +110,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
 
     const PERSISTENT_KEYBOARD = {
       keyboard: [
-        [{ text: '📋 Menu' }]
+        [{ text: '📋 Radar Menu' }]
       ],
       resize_keyboard: true,
       is_persistent: true
@@ -122,23 +123,23 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
         const baseUrl = await getBaseUrl();
         const inlineKeyboard = [
           [
-            { text: '🔍 Search & Add', callback_data: 'action_search_title' },
-            { text: '📋 Watchlist', callback_data: 'menu_watchlist_0' }
+            { text: '➕ Add to Watchlist', callback_data: 'action_search_title' },
+            { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' }
           ],
           [
             { text: '🎬 Recent Releases', callback_data: 'menu_recent_0' },
-            { text: '🔄 Scan Now', callback_data: 'action_force_scan' }
+            { text: '🔄 Scan Indexers Now', callback_data: 'action_force_scan' }
           ],
           [
             { text: '🍿 Main Dashboard', callback_data: 'action_main_menu' },
-            { text: '🌐 Web App', url: baseUrl }
+            { text: '🌐 Open Web App', url: baseUrl }
           ],
           [
             { text: '🗑️ Close Menu', callback_data: 'action_close_menu' }
           ]
         ];
 
-        const text = '<b>Choose an action:</b>';
+        const text = '<b>🍿 Release Radar Control Center</b>\n\nChoose an action using the buttons below:';
         const opts: any = {
           parse_mode: 'HTML',
           reply_markup: {
@@ -417,60 +418,28 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       }
     };
 
-    // Welcome handler
-    bot.onText(/\/start|\/menu/, async (msg: any) => {
+    // Initial welcome / entry handler (sends the clean inline button dashboard)
+    bot.onText(/\/start/, async (msg: any) => {
       const chatId = msg.chat.id;
-      bot.sendMessage(chatId, '✅ <b>Release Radar Connected!</b>\n\nTap <b>📋 Menu</b> below anytime to access controls.', {
-        parse_mode: 'HTML',
-        reply_markup: PERSISTENT_KEYBOARD
-      }).then(() => {
-        sendInlineMenu(chatId);
-      });
+      await sendInlineMenu(chatId);
     });
 
-    // Handle persistent keyboard button clicks & plain text input
+    // Handle persistent keyboard button clicks & plain text title searches
     bot.on('message', async (msg: any) => {
       if (!msg.text) return;
       const text = msg.text.trim();
       const chatId = msg.chat.id;
 
-      // Check persistent bottom keyboard button
-      if (text === '📋 Menu' || text === 'Menu') {
+      // Handle persistent button or any menu request
+      if (text === '📋 Radar Menu' || text === '📋 Menu' || text === 'Menu' || text.startsWith('/')) {
         await sendInlineMenu(chatId);
       } else if (text === '✖️ Close Menu' || text === 'Close Menu') {
         const prevId = lastMenuMessageId.get(chatId);
         if (prevId) {
           bot.deleteMessage(chatId, prevId).catch(() => {});
         }
-      } else if (text === '🔍 Search & Add') {
-        chatSearchActive.add(chatId);
-        bot.sendMessage(chatId, '🔍 <b>Search & Add to Radar</b>\n\nPlease type the title of the movie or TV show below:\n<i>(e.g., Severance, Slow Horses, Gladiator 2...)</i>', {
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
-            ]
-          }
-        });
-      } else if (text === '📋 Watchlist') {
-        await handleWatchlistView(chatId);
-      } else if (text === '🎬 Recent Releases') {
-        await handleRecentReleasesView(chatId);
-      } else if (text === '🔄 Scan Now') {
-        await handleForceScan(chatId);
-      } else if (text === '🍿 Main Dashboard') {
-        await sendDashboard(chatId);
-      } else if (text === '🌐 Web App') {
-        const baseUrl = await getBaseUrl();
-        bot.sendMessage(chatId, '🌐 <b>Open Web Application:</b>', {
-          reply_markup: {
-            inline_keyboard: [[{ text: '🍿 Open Web App', url: baseUrl }]]
-          }
-        });
-      } else if (text === '/start' || text === '/menu') {
-        // Handled by onText
       } else {
-        // Any regular text typed by the admin is treated as a real-time title search!
+        // Any text typed by the admin is treated as an instant title search to add to watchlist!
         await handleSearchQuery(chatId, text);
       }
     });
@@ -501,11 +470,11 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       else if (data === 'action_search_title') {
         chatSearchActive.add(chatId);
         if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
-        bot.sendMessage(chatId, '🔍 <b>Search & Add to Radar</b>\n\nPlease type the title of the movie or TV show below:\n<i>(e.g., Severance, Slow Horses, Gladiator 2, Dune...)</i>', {
+        bot.sendMessage(chatId, '🔍 <b>Add to Watchlist</b>\n\nPlease type the name of the movie or TV show to search and track:\n<i>(e.g., Ted Lasso, Severance, Gladiator 2, Dune...)</i>', {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
-              [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
+              [{ text: '🔙 Back to Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
             ]
           }
         });
@@ -531,31 +500,52 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
         }
 
         try {
-          // Save item to database
+          if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+
+          const isTV = item.type === 'Series';
+          const icon = isTV ? '📺' : '🎬';
+
+          const statusMsg = await bot.sendMessage(chatId, `⏳ <b>Adding to Radar & Searching...</b>\n\n${icon} <b>${escapeHtml(item.title)}</b> (${item.year})\n<i>Checking scene release indexers for all existing qualities & seasons right now...</i>`, {
+            parse_mode: 'HTML'
+          });
+
+          // 1. Save item to watchlist
           await db.insert(watchlist).values({
             title: item.title,
             year: item.year,
             type: item.type,
           }).onConflictDoNothing();
 
-          if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
+          // 2. Perform immediate search right there, find all qualities, and populate post card with ZERO notifications
+          const syncResult = await syncWatchlistItemImmediately({
+            title: item.title,
+            year: item.year,
+            type: item.type
+          });
 
-          const isTV = item.type === 'Series';
-          const icon = isTV ? '📺' : '🎬';
+          if (statusMsg?.message_id) {
+            bot.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
+          }
 
-          await bot.sendMessage(chatId, `✅ <b>Added to Radar!</b>\n\n${icon} <b>${escapeHtml(item.title)}</b> (${item.year}) [<i>${escapeHtml(item.type)}</i>]\n\n🟢 Radar will now monitor scene release indexers for this specific title.\n🔄 Checking download indexers now...`, {
+          let syncSummary = '';
+          if (syncResult.count > 0) {
+            syncSummary = isTV
+              ? `\n\n🟢 <b>Found ${syncResult.count} existing download releases / packs.</b>\n🔕 <i>Initial sync complete — all existing seasons indexed with 0 notification alerts.</i>\n\n🔔 <b>Radar will alert you the moment a brand-new episode drops to be downloaded!</b>`
+              : `\n\n🟢 <b>Found ${syncResult.count} existing qualities (${syncResult.topSeeds} seeds).</b>\n🔕 <i>Initial sync complete — no notification alert spam.</i>`;
+          } else {
+            syncSummary = `\n\n⏳ <b>Currently monitoring release schedule.</b>\n🔔 <b>Radar will alert you the moment it drops to be downloaded!</b>`;
+          }
+
+          await bot.sendMessage(chatId, `✅ <b>Added to Radar!</b>\n\n${icon} <b>${escapeHtml(item.title)}</b> (${item.year}) [<i>${escapeHtml(item.type)}</i>]${syncSummary}`, {
             parse_mode: 'HTML',
             reply_markup: {
               inline_keyboard: [
                 [{ text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' }],
-                [{ text: '🔍 Search Another Title', callback_data: 'action_search_title' }],
-                [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
+                [{ text: '➕ Add Another Title', callback_data: 'action_search_title' }],
+                [{ text: '🔙 Main Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
               ]
             }
           });
-
-          // Trigger immediate scan for this new addition
-          runScan().catch(() => {});
         } catch (addErr: any) {
           bot.sendMessage(chatId, `❌ Failed to add title: ${addErr.message}`, { parse_mode: 'HTML' });
         }
@@ -569,6 +559,8 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
           const item = await db.select().from(watchlist).where(eq(watchlist.id, wlId)).limit(1);
           if (item.length > 0) {
             await db.delete(watchlist).where(eq(watchlist.id, wlId));
+            // Also remove the corresponding card
+            await db.delete(releases).where(eq(releases.title, item[0].title));
             bot.sendMessage(chatId, `🗑️ Removed "<b>${escapeHtml(item[0].title)}</b>" from your Watchlist.`, { parse_mode: 'HTML' });
             await handleWatchlistView(chatId, 0, messageId);
           }

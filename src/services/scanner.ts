@@ -12,6 +12,124 @@ import { TMDBPremiereProvider } from '../providers/tmdbProvider';
 
 let isScanning = false;
 
+export async function syncWatchlistItemImmediately(wl: { title: string; year: number; type: string }): Promise<{ count: number; topSeeds: number; episodes: string[] }> {
+  try {
+    const isTV = wl.type?.toLowerCase() === 'series' || wl.type?.toLowerCase() === 'anime';
+    const baseTitle = normalizeMediaTitle(wl.title);
+    
+    // 1. Fetch metadata & poster
+    let metadata: any = await fetchMetadata(baseTitle, wl.year, wl.type);
+    let posterUrl = metadata?.poster || null;
+
+    if (!metadata) {
+      metadata = {
+        poster: posterUrl,
+        overview: `Monitored watchlist item: ${wl.title} (${wl.year})`,
+        sourceUrl: `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`,
+      };
+    }
+    if (!posterUrl) {
+      posterUrl = generateCustomPoster({
+        title: wl.title,
+        year: wl.year,
+        type: wl.type,
+        releaseType: 'Monitored',
+        sourceUrl: metadata?.sourceUrl || '',
+        provider: 'Radar Monitor',
+      });
+      metadata.poster = posterUrl;
+    }
+
+    // 2. Search scene & web release indexers right there for all available qualities and seasons
+    const downloadRadar = new DownloadRadarProvider();
+    const downloadMatches = await downloadRadar.findDownloadsForTitle(wl.title, wl.year, wl.type);
+
+    const downloads: any[] = [];
+    const episodeCodes = new Set<string>();
+
+    for (const dl of downloadMatches) {
+      const alreadyHas = downloads.some(d => d.sourceUrl === dl.sourceUrl || d.title === dl.name);
+      if (!alreadyHas) {
+        const ep = extractEpisodeOrPack(dl.name) || extractEpisodeOrPack(dl.quality);
+        if (ep) episodeCodes.add(ep.toUpperCase());
+
+        downloads.push({
+          id: Date.now() + Math.floor(Math.random() * 10000),
+          title: dl.name,
+          releaseType: `🟢 Download Available: ${dl.quality} (${dl.sizeText}) • ${dl.seeders} Seeds`,
+          sourceUrl: dl.magnetUrl,
+          seeders: dl.seeders || 0,
+          leechers: dl.leechers || 0,
+          createdAt: dl.uploadedAt ? dl.uploadedAt.toISOString() : new Date().toISOString()
+        });
+      }
+    }
+
+    downloads.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
+    const topSeeds = downloads.reduce((max, d) => Math.max(max, d.seeders || 0), 0);
+    const totalLeeches = downloads.reduce((sum, d) => sum + (d.leechers || 0), 0);
+    const bestSourceUrl = downloads[0]?.sourceUrl || metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`;
+
+    const qualitySummary = downloads.length > 0
+      ? `🟢 Download Available: ${downloads.length} Qualities • ${topSeeds} Seeds`
+      : '🟡 Monitored (Searching for releases...)';
+
+    const providerName = downloads.length > 0 ? 'Download Availability Radar' : 'Radar Monitor';
+
+    // 3. Mark all current episodes as already known/notified so NO notifications are dispatched
+    const notifiedEpisodes = Array.from(episodeCodes);
+    const notifiedMovie = !isTV && downloads.length > 0;
+
+    const metadataPayload = {
+      ...metadata,
+      downloads,
+      initialSyncCompleted: true,
+      notifiedEpisodes,
+      notifiedMovie,
+      lastSyncedAt: new Date().toISOString()
+    };
+
+    // 4. Create or update the single post card in releases table
+    const existing = await db.select().from(releases).where(eq(releases.title, wl.title)).limit(1);
+
+    if (existing.length > 0) {
+      await db.update(releases).set({
+        title: wl.title,
+        year: wl.year,
+        type: wl.type,
+        provider: providerName,
+        releaseType: qualitySummary,
+        sourceUrl: bestSourceUrl,
+        seeders: topSeeds,
+        leechers: totalLeeches,
+        poster: posterUrl || existing[0].poster,
+        metadataJson: metadataPayload,
+        updatedAt: new Date()
+      }).where(eq(releases.id, existing[0].id));
+    } else {
+      await db.insert(releases).values({
+        title: wl.title,
+        year: wl.year,
+        type: wl.type,
+        provider: providerName,
+        sourceUrl: bestSourceUrl,
+        releaseType: qualitySummary,
+        poster: posterUrl,
+        metadataJson: metadataPayload,
+        seeders: topSeeds,
+        leechers: totalLeeches,
+      }).onConflictDoNothing();
+    }
+
+    await logSuccess(`[Initial Search] Ingested ${downloads.length} quality release(s) for "${wl.title}" right away — 0 spam notifications sent.`, 'DownloadRadar');
+    return { count: downloads.length, topSeeds, episodes: notifiedEpisodes };
+  } catch (err: any) {
+    console.error('Error during immediate watchlist item sync:', err);
+    await logError(`Immediate sync error for "${wl.title}": ${err.message}`, 'Scanner');
+    return { count: 0, topSeeds: 0, episodes: [] };
+  }
+}
+
 export function isWatchlistMatch(
   release: { title: string; year: number; type: string },
   watchlistItems: { title: string; year: number; type: string }[]
@@ -102,7 +220,7 @@ export async function runScan() {
     const existingReleases = await db.select().from(releases);
     const notificationsToSend: any[] = [];
 
-    // Process each watchlist item to discover and store all available qualities and episodes
+    // Process each watchlist item: strictly maintain 1 card per movie/show in database
     for (const wl of items) {
       const normWlTitle = normalizeMediaTitle(wl.title).toLowerCase().replace(/[^a-z0-9]/g, '');
       const isTV = wl.type?.toLowerCase() === 'series' || wl.type?.toLowerCase() === 'anime';
@@ -110,6 +228,12 @@ export async function runScan() {
       // Find all download releases for this title across qualities and episodes
       const matchingDlItems = downloadItems.filter(d => {
         const normDTitle = normalizeMediaTitle(d.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+        const isPartTwo = normDTitle.includes('parttwo') || normDTitle.includes('part2') || normDTitle.includes('partii');
+        if (wl.title.toLowerCase().includes('part two') || wl.title.toLowerCase().includes('part 2')) {
+          return isPartTwo;
+        } else if (wl.title.toLowerCase() === 'dune') {
+          return !isPartTwo && normDTitle.includes('dune') && !normDTitle.includes('prophecy');
+        }
         return normDTitle === normWlTitle || normDTitle.startsWith(normWlTitle) || normWlTitle.startsWith(normDTitle);
       });
 
@@ -143,159 +267,206 @@ export async function runScan() {
         metadata.poster = posterUrl;
       }
 
-      if (matchingDlItems.length > 0) {
-        // Track which episodes or releases were ALREADY in the database before this scan
-        const knownEpisodes = new Set<string>();
-        let movieAlreadySaved = false;
+      // 1. Locate the single card for this movie/show in releases
+      let movieCard = existingReleases.find(r => {
+        const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+        const isPartTwo = normRTitle.includes('parttwo') || normRTitle.includes('part2') || normRTitle.includes('partii');
+        if (wl.title.toLowerCase().includes('part two') || wl.title.toLowerCase().includes('part 2')) {
+          return isPartTwo;
+        } else if (wl.title.toLowerCase() === 'dune') {
+          return !isPartTwo && normRTitle.includes('dune') && !normRTitle.includes('prophecy');
+        }
+        return normRTitle === normWlTitle || r.title.toLowerCase() === wl.title.toLowerCase();
+      });
 
-        for (const r of existingReleases) {
-          const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
-          const isMatch = normWlTitle === normRTitle || normWlTitle.startsWith(normRTitle) || normRTitle.startsWith(normWlTitle);
-          if (isMatch && (r.sourceUrl?.startsWith('magnet:') || r.releaseType?.includes('Download Available'))) {
-            if (isTV) {
-              const ep = extractEpisodeOrPack(r.title) || extractEpisodeOrPack(r.releaseType);
-              if (ep) {
-                knownEpisodes.add(ep.toUpperCase());
-              }
-            } else {
-              movieAlreadySaved = true;
-            }
+      // If card doesn't exist yet, create it immediately
+      if (!movieCard) {
+        const [createdCard] = await db.insert(releases).values({
+          title: wl.title,
+          year: wl.year,
+          type: wl.type,
+          provider: 'Radar Monitor',
+          sourceUrl: metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`,
+          releaseType: tmdbItem ? tmdbItem.releaseType : '🟡 Monitored (Searching for releases...)',
+          poster: posterUrl,
+          metadataJson: {
+            ...metadata,
+            downloads: []
+          },
+          seeders: 0,
+          leechers: 0,
+        }).onConflictDoNothing().returning();
+
+        if (createdCard) {
+          movieCard = createdCard;
+          existingReleases.push(createdCard);
+        } else {
+          const found = await db.select().from(releases).where(eq(releases.title, wl.title)).limit(1);
+          if (found.length > 0) {
+            movieCard = found[0];
+            existingReleases.push(found[0]);
           }
         }
+      }
 
-        // Remove any old non-download placeholder cards for this title
-        const placeholderCards = existingReleases.filter(r => {
-          const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
-          const isMatch = normWlTitle === normRTitle || normWlTitle.startsWith(normRTitle) || normRTitle.startsWith(normWlTitle);
-          return isMatch && !r.sourceUrl?.startsWith('magnet:') && !r.releaseType?.includes('Download Available');
-        });
+      if (!movieCard) continue;
 
-        for (const ph of placeholderCards) {
-          await db.delete(releases).where(eq(releases.id, ph.id));
-          const idx = existingReleases.findIndex(r => r.id === ph.id);
-          if (idx !== -1) existingReleases.splice(idx, 1);
+      if (matchingDlItems.length > 0) {
+        // Read existing downloads attached to this card
+        const cardMeta = (movieCard.metadataJson as any) || {};
+        const isInitialSync = cardMeta.initialSyncCompleted !== true;
+
+        const currentDownloads: any[] = Array.isArray(cardMeta.downloads)
+          ? [...cardMeta.downloads]
+          : [];
+
+        const notifiedEpisodes = new Set<string>(
+          Array.isArray(cardMeta.notifiedEpisodes)
+            ? cardMeta.notifiedEpisodes.map((e: string) => e.toUpperCase())
+            : []
+        );
+
+        // Also add any episodes already in currentDownloads to notifiedEpisodes so we never re-alert
+        for (const d of currentDownloads) {
+          const ep = extractEpisodeOrPack(d.title) || extractEpisodeOrPack(d.releaseType);
+          if (ep) notifiedEpisodes.add(ep.toUpperCase());
         }
 
-        const newEpisodeNotifications: any[] = [];
+        let notifiedMovie = Boolean(cardMeta.notifiedMovie) || (!isTV && currentDownloads.length > 0);
         let newlyDiscoveredCount = 0;
+        const newEpisodeNotifications: any[] = [];
 
         for (const dl of matchingDlItems) {
-          // Check if this specific release already exists in database
-          const existingRelease = existingReleases.find(r => r.sourceUrl === dl.sourceUrl || r.title === dl.title);
+          const existingIdx = currentDownloads.findIndex(d => 
+            d.sourceUrl === dl.sourceUrl || d.title === dl.title
+          );
 
-          if (existingRelease) {
-            // Update stats
-            await db.update(releases).set({
-              releaseType: dl.releaseType,
-              seeders: dl.seeders || 0,
-              leechers: dl.leechers || 0,
-              poster: posterUrl,
-              metadataJson: metadata,
-            }).where(eq(releases.id, existingRelease.id));
-
-            existingRelease.releaseType = dl.releaseType;
-            existingRelease.seeders = dl.seeders;
-            existingRelease.leechers = dl.leechers;
+          if (existingIdx !== -1) {
+            currentDownloads[existingIdx].seeders = dl.seeders || 0;
+            currentDownloads[existingIdx].leechers = dl.leechers || 0;
+            currentDownloads[existingIdx].releaseType = dl.releaseType;
           } else {
-            // Insert newly discovered quality / release into DB so admin can view all qualities on web app
-            const [inserted] = await db.insert(releases).values({
+            // Append new quality release to this movie's downloads
+            const newDl = {
+              id: Date.now() + Math.floor(Math.random() * 10000),
               title: dl.title,
-              year: wl.year,
-              type: wl.type,
-              provider: 'Download Availability Radar',
-              sourceUrl: dl.sourceUrl,
               releaseType: dl.releaseType,
+              sourceUrl: dl.sourceUrl,
               seeders: dl.seeders || 0,
               leechers: dl.leechers || 0,
-              poster: posterUrl,
-              metadataJson: metadata,
-            }).returning();
+              createdAt: new Date().toISOString()
+            };
+            currentDownloads.push(newDl);
+            newlyDiscoveredCount++;
 
-            if (inserted) {
-              existingReleases.push(inserted);
-              newlyDiscoveredCount++;
-
-              // STRICT ONE-TIME NOTIFICATION CHECK:
-              // 1. For TV shows: only notify when a brand-new episode drops. Skip if this episode was already saved before!
-              // 2. For movies: only notify once when the movie first becomes downloadable. Skip when other qualities are added!
+            // Strict notification logic:
+            // 1. If this title is undergoing its initial sync, DO NOT notify (zero alert spam on addition!)
+            // 2. If it's a TV show and not initial sync: notify ONE TIME only when a brand-new episode drops!
+            // 3. If it's a movie and not initial sync: notify ONE TIME only when the movie first becomes downloadable!
+            if (!isInitialSync) {
               if (isTV) {
                 const ep = extractEpisodeOrPack(dl.title) || extractEpisodeOrPack(dl.releaseType);
-                const epKey = (ep || 'GENERAL').toUpperCase();
-                if (!knownEpisodes.has(epKey)) {
-                  // Brand new episode discovered!
-                  knownEpisodes.add(epKey);
-                  newEpisodeNotifications.push(inserted);
+                const epKey = ep ? ep.toUpperCase() : null;
+                if (epKey && !notifiedEpisodes.has(epKey)) {
+                  // Brand new episode dropped!
+                  notifiedEpisodes.add(epKey);
+                  newEpisodeNotifications.push({
+                    ...movieCard,
+                    title: dl.title,
+                    releaseType: dl.releaseType,
+                    sourceUrl: dl.sourceUrl,
+                    poster: posterUrl || movieCard.poster
+                  });
                   await logSuccess(`🔥 Brand new episode dropped: ${wl.title} ${epKey}`, 'DownloadRadar');
                 }
               } else {
-                if (!movieAlreadySaved) {
-                  movieAlreadySaved = true;
-                  newEpisodeNotifications.push(inserted);
+                if (!notifiedMovie && newEpisodeNotifications.length === 0) {
+                  notifiedMovie = true;
+                  newEpisodeNotifications.push({
+                    ...movieCard,
+                    title: dl.title,
+                    releaseType: dl.releaseType,
+                    sourceUrl: dl.sourceUrl,
+                    poster: posterUrl || movieCard.poster
+                  });
                   await logSuccess(`🔥 Movie newly available: ${wl.title}`, 'DownloadRadar');
                 }
+              }
+            } else {
+              // During initial sync, register all existing episodes so they never trigger future notifications
+              if (isTV) {
+                const ep = extractEpisodeOrPack(dl.title) || extractEpisodeOrPack(dl.releaseType);
+                if (ep) notifiedEpisodes.add(ep.toUpperCase());
+              } else {
+                notifiedMovie = true;
               }
             }
           }
         }
 
+        // Sort qualities by seeders desc
+        currentDownloads.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
+
+        const topSeeds = currentDownloads.reduce((max, d) => Math.max(max, d.seeders || 0), 0);
+        const totalLeeches = currentDownloads.reduce((sum, d) => sum + (d.leechers || 0), 0);
+        const bestQualitySummary = `🟢 Download Available: ${currentDownloads.length} Qualities • ${topSeeds} Seeds`;
+        const bestSourceUrl = currentDownloads[0]?.sourceUrl || movieCard.sourceUrl;
+
+        // Update the SINGLE movie card in releases table (NO duplicate cards created!)
+        await db.update(releases).set({
+          title: wl.title,
+          year: wl.year,
+          type: wl.type,
+          provider: 'Download Availability Radar',
+          releaseType: bestQualitySummary,
+          sourceUrl: bestSourceUrl,
+          seeders: topSeeds,
+          leechers: totalLeeches,
+          poster: posterUrl || movieCard.poster,
+          metadataJson: {
+            ...metadata,
+            downloads: currentDownloads,
+            initialSyncCompleted: true,
+            notifiedEpisodes: Array.from(notifiedEpisodes),
+            notifiedMovie,
+            lastSyncedAt: new Date().toISOString()
+          },
+          updatedAt: new Date()
+        }).where(eq(releases.id, movieCard.id));
+
         if (newlyDiscoveredCount > 0) {
-          await logInfo(`Saved ${newlyDiscoveredCount} new quality release(s) for "${wl.title}" to database`, 'DownloadRadar');
+          await logInfo(`Updated "${wl.title}" card with ${newlyDiscoveredCount} newly discovered quality release(s)`, 'DownloadRadar');
         }
 
-        // Queue notifications for newly discovered episodes only
         if (newEpisodeNotifications.length > 0) {
           for (const itemToNotify of newEpisodeNotifications) {
             notificationsToSend.push(itemToNotify);
           }
         }
       } else {
-        // No downloads available yet: keep a single status / scheduled release card
-        const finalStatus = tmdbItem ? tmdbItem.releaseType : `⏳ Monitoring release schedule`;
+        // No download files online yet: ensure card status is kept up to date
+        const cardMeta = (movieCard.metadataJson as any) || {};
+        const finalStatus = tmdbItem ? tmdbItem.releaseType : `🟡 Monitored (Searching for releases...)`;
         const finalSourceUrl = tmdbItem ? tmdbItem.sourceUrl : (metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`);
-        const finalProvider = tmdbItem ? 'TMDB Premiere Radar' : 'Release Radar';
+        const finalProvider = tmdbItem ? 'TMDB Premiere Radar' : 'Radar Monitor';
 
-        const existingCard = existingReleases.find(r => {
-          const normRTitle = normalizeMediaTitle(r.title).toLowerCase().replace(/[^a-z0-9]/g, '');
-          return normWlTitle === normRTitle || normWlTitle.startsWith(normRTitle) || normRTitle.startsWith(normWlTitle);
-        });
-
-        if (existingCard) {
-          const statusChanged = existingCard.releaseType !== finalStatus;
-          await db.update(releases).set({
-            title: wl.title,
-            year: wl.year,
-            type: wl.type,
-            provider: finalProvider,
-            sourceUrl: finalSourceUrl,
-            releaseType: finalStatus,
-            poster: posterUrl,
-            metadataJson: metadata,
-          }).where(eq(releases.id, existingCard.id));
-
-          existingCard.releaseType = finalStatus;
-          existingCard.sourceUrl = finalSourceUrl;
-          if (statusChanged && tmdbItem) {
-            notificationsToSend.push(existingCard);
-          }
-        } else {
-          const [inserted] = await db.insert(releases).values({
-            title: wl.title,
-            year: wl.year,
-            type: wl.type,
-            provider: finalProvider,
-            sourceUrl: finalSourceUrl,
-            releaseType: finalStatus,
-            poster: posterUrl,
-            metadataJson: metadata,
-          }).returning();
-
-          if (inserted) {
-            existingReleases.push(inserted);
-            if (tmdbItem) {
-              notificationsToSend.push(inserted);
-            }
-          }
-        }
+        await db.update(releases).set({
+          title: wl.title,
+          year: wl.year,
+          type: wl.type,
+          provider: finalProvider,
+          sourceUrl: finalSourceUrl,
+          releaseType: finalStatus,
+          poster: posterUrl || movieCard.poster,
+          metadataJson: {
+            ...metadata,
+            downloads: cardMeta.downloads || [],
+            initialSyncCompleted: true,
+            notifiedEpisodes: cardMeta.notifiedEpisodes || [],
+            notifiedMovie: cardMeta.notifiedMovie || false
+          },
+          updatedAt: new Date()
+        }).where(eq(releases.id, movieCard.id));
       }
     }
 

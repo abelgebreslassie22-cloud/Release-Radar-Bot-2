@@ -26,10 +26,11 @@ export const releases = pgTable('releases', {
   poster: text('poster'),
   metadataJson: jsonb('metadata_json'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => {
   return {
     releasesTitleYearIdx: index('releases_title_year_idx').on(table.title, table.year),
-    releasesSourceUrlIdx: uniqueIndex('releases_source_url_idx').on(table.sourceUrl),
+    releasesTitleYearTypeIdx: uniqueIndex('releases_title_year_type_idx').on(table.title, table.year, table.type),
   };
 });
 

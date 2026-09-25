@@ -79,7 +79,13 @@ export function normalizeMediaTitle(rawTitle: string): string {
   const splitMatch = title.split(/\b(720p|1080p|2160p|4k|WEB-DL|WEBRip|WEB|BluRay|HDTV|HD|BrRip|DVDRip|XviD|x264|x265|HEVC|AAC|DDP5\.1|AMZN|ATVP|HMAX|NF|mSD|AFG|FLAC|TRUEHD|DTS)\b/i);
   title = splitMatch[0];
 
-  // 4. Strip scene descriptors, languages, edition, 3D/audio flags
+  // 4. Normalize Part numbers e.g. "Part Two" -> "Part 2", "Part II" -> "Part 2"
+  title = title.replace(/\bpart\s+(?:two|ii)\b/gi, 'Part 2');
+  title = title.replace(/\bpart\s+(?:one|i)\b/gi, 'Part 1');
+  title = title.replace(/\bpart\s+(?:three|iii)\b/gi, 'Part 3');
+  title = title.replace(/\bpart\s+(?:four|iv)\b/gi, 'Part 4');
+
+  // 5. Strip scene descriptors, languages, edition, 3D/audio flags
   const sceneTags = [
     '3D', '2D', 'HSBS', 'OU', 'SBS', 'HOU', 'MULTi', 'VFi', 'VF', 'VOSTFR', 'TRUEFRENCH',
     'NORDiC', 'ENG', 'ENGLISH', 'GERMAN', 'SPANISH', 'iTA', 'ITALIAN', 'RUSSIAN', 'SWESUB', 'SWEDISH', 'DANISH', 'NORWEGIAN', 'FINNISH', 'FRENCH',
@@ -89,10 +95,10 @@ export function normalizeMediaTitle(rawTitle: string): string {
   const tagRegex = new RegExp(`\\b(${sceneTags.join('|')})\\b`, 'gi');
   title = title.replace(tagRegex, ' ');
 
-  // 5. Strip empty parens/brackets leftover from year/tag removal
+  // 6. Strip empty parens/brackets leftover from year/tag removal
   title = title.replace(/\(\s*\)|\[\s*\]|\{\s*\}/g, ' ');
 
-  // 6. Clean trailing/leading punctuation & extra spaces
+  // 7. Clean trailing/leading punctuation & extra spaces
   title = title
     .replace(/[\(\[\{:\-_.\s]+$/g, '')
     .replace(/^[\(\[\{:\-_.\s]+/g, '')
@@ -130,7 +136,9 @@ export function groupReleases(releases: ReleaseItem[]): MediaGroup[] {
     if (!group) {
       group = {
         groupKey,
-        canonicalTitle,
+        canonicalTitle: (rel.title && !rel.title.includes('1080p') && !rel.title.includes('720p') && !rel.title.includes('x265')) 
+          ? rel.title 
+          : canonicalTitle,
         year: rel.year,
         type: rel.type || 'Movie',
         poster: rel.poster || null,
@@ -150,15 +158,40 @@ export function groupReleases(releases: ReleaseItem[]): MediaGroup[] {
       group.type = 'Series';
     }
 
-    // Add release to group
-    group.releases.push(rel);
+    // Unpack downloads array if stored in metadataJson.downloads
+    const downloadsList: any[] = Array.isArray(rel.metadataJson?.downloads) && rel.metadataJson.downloads.length > 0
+      ? rel.metadataJson.downloads
+      : [rel];
 
-    // Update stats
-    const stats = getReleaseSeedsAndLeeches(rel);
-    group.totalSeeders += stats.seeders;
-    group.totalLeechers += stats.leechers;
-    if (stats.seeders > group.topSeeders) {
-      group.topSeeders = stats.seeders;
+    for (const dl of downloadsList) {
+      const itemRelease: ReleaseItem = {
+        id: dl.id || rel.id,
+        title: dl.title || rel.title,
+        year: rel.year,
+        type: rel.type,
+        provider: dl.provider || rel.provider,
+        sourceUrl: dl.sourceUrl || rel.sourceUrl,
+        releaseType: dl.releaseType || rel.releaseType,
+        seeders: dl.seeders !== undefined ? dl.seeders : (rel.seeders || 0),
+        leechers: dl.leechers !== undefined ? dl.leechers : (rel.leechers || 0),
+        poster: rel.poster,
+        metadataJson: rel.metadataJson,
+        createdAt: dl.createdAt || rel.createdAt
+      };
+
+      // Deduplicate by sourceUrl inside group
+      const alreadyHas = group.releases.some(r => r.sourceUrl && itemRelease.sourceUrl && r.sourceUrl === itemRelease.sourceUrl);
+      if (!alreadyHas) {
+        group.releases.push(itemRelease);
+        group.totalSeeders += itemRelease.seeders || 0;
+        group.totalLeechers += itemRelease.leechers || 0;
+        if ((itemRelease.seeders || 0) > group.topSeeders) {
+          group.topSeeders = itemRelease.seeders || 0;
+        }
+        if (itemRelease.releaseType && !group.availableQualities.includes(itemRelease.releaseType)) {
+          group.availableQualities.push(itemRelease.releaseType);
+        }
+      }
     }
 
     // Update poster if current group poster is null but this release has one

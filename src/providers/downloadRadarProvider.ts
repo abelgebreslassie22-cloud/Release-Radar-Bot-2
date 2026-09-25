@@ -60,11 +60,24 @@ export function extractQuality(name: string): string {
 }
 
 export function extractEpisodeOrPack(name: string): string | undefined {
-  const epMatch = name.match(/\bS(\d{1,2})E(\d{1,2})\b/i);
+  if (!name) return undefined;
+
+  // S01E06 or S1E6 or S01.E06
+  const epMatch = name.match(/\bS(\d{1,2})[ ._-]*E(\d{1,2})\b/i);
   if (epMatch) {
     return `S${epMatch[1].padStart(2, '0')}E${epMatch[2].padStart(2, '0')}`;
   }
-  const packMatch = name.match(/\bS(\d{1,2})\b(?!\s*E\d)/i) || name.match(/\bSeason\s*(\d{1,2})\b/i);
+
+  // 4x09 or 04x09
+  const xMatch = name.match(/\b(\d{1,2})x(\d{1,2})\b/i);
+  if (xMatch) {
+    return `S${xMatch[1].padStart(2, '0')}E${xMatch[2].padStart(2, '0')}`;
+  }
+
+  // Season 1 Pack, S01 Complete, Season 1
+  const packMatch = name.match(/\bSeason\s*(\d{1,2})\b/i) || 
+                    name.match(/\bS(\d{1,2})\s*(?:COMPLETE|PACK|DISC|BLURAY|WEBRIP|HDTV)\b/i) ||
+                    name.match(/\bS(\d{1,2})\b(?!\s*E\d)/i);
   if (packMatch) {
     return `Season ${parseInt(packMatch[1], 10)} Pack`;
   }
@@ -91,7 +104,7 @@ export class DownloadRadarProvider implements Provider {
 
   async findDownloadsForTitle(title: string, year: number, type: string): Promise<DownloadMatch[]> {
     const isTV = type?.toLowerCase() === 'series' || type?.toLowerCase() === 'anime';
-    const cleanTitle = normalizeMediaTitle(title);
+    const cleanTitle = title.replace(/[:_.,/\\!?'"@#$%^&*+=\-[\](){}]/g, ' ').replace(/\s+/g, ' ').trim();
     const results: DownloadMatch[] = [];
 
     // Search Apibay (The Pirate Bay / Scene Releases API)
