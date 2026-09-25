@@ -107,7 +107,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
     const chatSearchResults = new Map<number, any[]>();
     const chatSearchActive = new Set<number>();
 
-    const COLLAPSED_KEYBOARD = {
+    const PERSISTENT_KEYBOARD = {
       keyboard: [
         [{ text: '📋 Menu' }]
       ],
@@ -115,15 +115,63 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       is_persistent: true
     };
 
-    const EXPANDED_KEYBOARD = {
-      keyboard: [
-        [{ text: '🔍 Search & Add' }, { text: '📋 Watchlist' }],
-        [{ text: '🎬 Recent Releases' }, { text: '🔄 Scan Now' }],
-        [{ text: '🍿 Main Dashboard' }, { text: '🌐 Web App' }],
-        [{ text: '✖️ Close Menu' }]
-      ],
-      resize_keyboard: true,
-      is_persistent: true
+    const lastMenuMessageId = new Map<number, number>();
+
+    const sendInlineMenu = async (chatId: number, editMessageId?: number) => {
+      try {
+        const baseUrl = await getBaseUrl();
+        const inlineKeyboard = [
+          [
+            { text: '🔍 Search & Add', callback_data: 'action_search_title' },
+            { text: '📋 Watchlist', callback_data: 'menu_watchlist_0' }
+          ],
+          [
+            { text: '🎬 Recent Releases', callback_data: 'menu_recent_0' },
+            { text: '🔄 Scan Now', callback_data: 'action_force_scan' }
+          ],
+          [
+            { text: '🍿 Main Dashboard', callback_data: 'action_main_menu' },
+            { text: '🌐 Web App', url: baseUrl }
+          ],
+          [
+            { text: '🗑️ Close Menu', callback_data: 'action_close_menu' }
+          ]
+        ];
+
+        const text = '<b>Choose an action:</b>';
+        const opts: any = {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: inlineKeyboard
+          }
+        };
+
+        if (editMessageId) {
+          try {
+            await bot.editMessageText(text, {
+              chat_id: chatId,
+              message_id: editMessageId,
+              ...opts
+            });
+            lastMenuMessageId.set(chatId, editMessageId);
+            return;
+          } catch (e) {
+            bot.deleteMessage(chatId, editMessageId).catch(() => {});
+          }
+        }
+
+        const prevId = lastMenuMessageId.get(chatId);
+        if (prevId) {
+          bot.deleteMessage(chatId, prevId).catch(() => {});
+        }
+
+        const sentMsg = await bot.sendMessage(chatId, text, opts);
+        if (sentMsg?.message_id) {
+          lastMenuMessageId.set(chatId, sentMsg.message_id);
+        }
+      } catch (err) {
+        console.error('Error sending inline menu:', err);
+      }
     };
 
     const sendDashboard = async (chatId: number, messageId?: number) => {
@@ -151,6 +199,10 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
           ],
           [
             { text: '🌐 Open Full Web App', url: baseUrl }
+          ],
+          [
+            { text: '🔙 Menu', callback_data: 'action_choose_menu' },
+            { text: '🗑️ Close', callback_data: 'action_close_menu' }
           ]
         ];
 
@@ -162,7 +214,16 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
         };
 
         if (messageId) {
-          bot.deleteMessage(chatId, messageId).catch(() => {});
+          try {
+            await bot.editMessageText(text, {
+              chat_id: chatId,
+              message_id: messageId,
+              ...opts
+            });
+            return;
+          } catch (e) {
+            bot.deleteMessage(chatId, messageId).catch(() => {});
+          }
         }
         await bot.sendMessage(chatId, text, opts);
       } catch (err) {
@@ -186,7 +247,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
             reply_markup: {
               inline_keyboard: [
                 [{ text: '🔍 Try Another Search', callback_data: 'action_search_title' }],
-                [{ text: '🔙 Back to Dashboard', callback_data: 'action_main_menu' }]
+                [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
               ]
             }
           });
@@ -215,7 +276,8 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
 
         buttons.push([
           { text: '🔍 Search Another', callback_data: 'action_search_title' },
-          { text: '❌ Cancel', callback_data: 'action_main_menu' }
+          { text: '🔙 Menu', callback_data: 'action_choose_menu' },
+          { text: '🗑️ Close', callback_data: 'action_close_menu' }
         ]);
 
         bot.deleteMessage(chatId, searchingMsg.message_id).catch(() => {});
@@ -244,7 +306,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
             inline_keyboard: [
               [{ text: '🔍 Search & Add Title', callback_data: 'action_search_title' }],
               [{ text: '🌐 Open Web Watchlist', url: `${baseUrl}/#/watchlist` }],
-              [{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]
+              [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
             ]
           }
         });
@@ -271,7 +333,8 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       
       buttons.push([
         { text: '🔍 Add New Title', callback_data: 'action_search_title' },
-        { text: '🔙 Back to Menu', callback_data: 'action_main_menu' }
+        { text: '🔙 Menu', callback_data: 'action_choose_menu' },
+        { text: '🗑️ Close', callback_data: 'action_close_menu' }
       ]);
 
       if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
@@ -295,7 +358,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
           reply_markup: {
             inline_keyboard: [
               [{ text: '🔄 Force Scan Now', callback_data: 'action_force_scan' }],
-              [{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]
+              [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
             ]
           }
         });
@@ -320,7 +383,10 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       if (page < totalPages - 1) navRow.push({ text: 'Next ➡️', callback_data: `menu_recent_${page + 1}` });
       if (navRow.length > 0) buttons.push(navRow);
       
-      buttons.push([{ text: '🔙 Back to Menu', callback_data: 'action_main_menu' }]);
+      buttons.push([
+        { text: '🔙 Menu', callback_data: 'action_choose_menu' },
+        { text: '🗑️ Close', callback_data: 'action_close_menu' }
+      ]);
 
       if (messageId) bot.deleteMessage(chatId, messageId).catch(() => {});
       bot.sendMessage(chatId, relText, {
@@ -341,7 +407,8 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
           reply_markup: {
             inline_keyboard: [
               [{ text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' }],
-              [{ text: '🎬 Recent Releases', callback_data: 'menu_recent_0' }]
+              [{ text: '🎬 Recent Releases', callback_data: 'menu_recent_0' }],
+              [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
             ]
           }
         });
@@ -351,12 +418,13 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
     };
 
     // Welcome handler
-    bot.onText(/\/start|\/menu/, (msg: any) => {
-      bot.sendMessage(msg.chat.id, '✅ <b>Release Radar Connected!</b>\n\nTap <b>📋 Menu</b> below anytime to access controls.', {
+    bot.onText(/\/start|\/menu/, async (msg: any) => {
+      const chatId = msg.chat.id;
+      bot.sendMessage(chatId, '✅ <b>Release Radar Connected!</b>\n\nTap <b>📋 Menu</b> below anytime to access controls.', {
         parse_mode: 'HTML',
-        reply_markup: COLLAPSED_KEYBOARD
+        reply_markup: PERSISTENT_KEYBOARD
       }).then(() => {
-        sendDashboard(msg.chat.id);
+        sendInlineMenu(chatId);
       });
     });
 
@@ -366,23 +434,22 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       const text = msg.text.trim();
       const chatId = msg.chat.id;
 
-      // Check persistent bottom keyboard buttons
+      // Check persistent bottom keyboard button
       if (text === '📋 Menu' || text === 'Menu') {
-        bot.sendMessage(chatId, '📋 <b>Menu Controls:</b>\n\nSelect an option below or tap <b>✖️ Close Menu</b> to hide:', {
-          parse_mode: 'HTML',
-          reply_markup: EXPANDED_KEYBOARD
-        });
+        await sendInlineMenu(chatId);
       } else if (text === '✖️ Close Menu' || text === 'Close Menu') {
-        bot.sendMessage(chatId, '👌 <b>Menu collapsed.</b> Tap <b>📋 Menu</b> below anytime to open.', {
-          parse_mode: 'HTML',
-          reply_markup: COLLAPSED_KEYBOARD
-        });
+        const prevId = lastMenuMessageId.get(chatId);
+        if (prevId) {
+          bot.deleteMessage(chatId, prevId).catch(() => {});
+        }
       } else if (text === '🔍 Search & Add') {
         chatSearchActive.add(chatId);
         bot.sendMessage(chatId, '🔍 <b>Search & Add to Radar</b>\n\nPlease type the title of the movie or TV show below:\n<i>(e.g., Severance, Slow Horses, Gladiator 2...)</i>', {
           parse_mode: 'HTML',
           reply_markup: {
-            inline_keyboard: [[{ text: '❌ Cancel Search', callback_data: 'action_cancel_search' }]]
+            inline_keyboard: [
+              [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
+            ]
           }
         });
       } else if (text === '📋 Watchlist') {
@@ -420,7 +487,15 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
 
       if (!chatId || !data) return;
 
-      if (data === 'action_main_menu') {
+      if (data === 'action_choose_menu') {
+        await sendInlineMenu(chatId, messageId);
+      }
+      else if (data === 'action_close_menu') {
+        if (messageId) {
+          bot.deleteMessage(chatId, messageId).catch(() => {});
+        }
+      }
+      else if (data === 'action_main_menu') {
         await sendDashboard(chatId, messageId);
       } 
       else if (data === 'action_search_title') {
@@ -429,13 +504,18 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
         bot.sendMessage(chatId, '🔍 <b>Search & Add to Radar</b>\n\nPlease type the title of the movie or TV show below:\n<i>(e.g., Severance, Slow Horses, Gladiator 2, Dune...)</i>', {
           parse_mode: 'HTML',
           reply_markup: {
-            inline_keyboard: [[{ text: '❌ Cancel Search', callback_data: 'action_cancel_search' }]]
+            inline_keyboard: [
+              [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
+            ]
           }
         });
       }
       else if (data === 'action_cancel_search') {
         chatSearchActive.delete(chatId);
-        await sendDashboard(chatId, messageId);
+        if (messageId) {
+          bot.deleteMessage(chatId, messageId).catch(() => {});
+        }
+        await sendInlineMenu(chatId);
       }
       else if (data.startsWith('add_tmdb_')) {
         const idx = parseInt(data.replace('add_tmdb_', ''), 10);
@@ -469,7 +549,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
               inline_keyboard: [
                 [{ text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' }],
                 [{ text: '🔍 Search Another Title', callback_data: 'action_search_title' }],
-                [{ text: '🔙 Back to Dashboard', callback_data: 'action_main_menu' }]
+                [{ text: '🔙 Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
               ]
             }
           });
