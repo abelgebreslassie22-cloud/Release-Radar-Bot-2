@@ -26,6 +26,12 @@ export async function initializeSettings(instanceId?: string) {
       if (!active.appUrl || active.appUrl.includes('jrnm.app') || active.appUrl.includes('ais-dev-') || active.appUrl.includes('ais-pre-') || active.appUrl.includes('release-radar-bot.onrender.com')) {
         updates.appUrl = 'https://release-radar-bot-2.onrender.com';
       }
+      if (process.env.TELEGRAM_BOT_TOKEN && !active.telegramBotToken) {
+        updates.telegramBotToken = process.env.TELEGRAM_BOT_TOKEN.trim();
+      }
+      if (process.env.TELEGRAM_CHAT_ID && !active.telegramChatId) {
+        updates.telegramChatId = process.env.TELEGRAM_CHAT_ID.trim();
+      }
       if (Object.keys(updates).length > 0) {
         await db.update(settings).set(updates).where(eq(settings.id, active.id));
       }

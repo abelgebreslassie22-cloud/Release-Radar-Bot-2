@@ -5,6 +5,7 @@ import {
   ArrowUpDown, Zap, ShieldCheck, Trash2
 } from 'lucide-react';
 import { groupReleases, MediaGroup, ReleaseItem } from '../../utils/mediaGrouper';
+import { detectSeasonPack } from '../../utils/seasonPack';
 import { Badge } from '../ui/Badge';
 import { useToast } from '../ui/Toast';
 import { Skeleton } from '../ui/Skeleton';
@@ -199,7 +200,7 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
     '4k': group.releases.filter(r => /2160p|4k|uhd/i.test(r.releaseType) || /2160p|4k|uhd/i.test(r.title)).length,
     '1080p': group.releases.filter(r => /1080p/i.test(r.releaseType) || /1080p/i.test(r.title)).length,
     '720p': group.releases.filter(r => /720p/i.test(r.releaseType) || /720p/i.test(r.title)).length,
-    packs: group.releases.filter(r => /season|pack/i.test(r.releaseType) || /season|pack/i.test(r.title)).length,
+    packs: group.releases.filter(r => r.releaseType.includes('📦') || detectSeasonPack(r.title).isPack || detectSeasonPack(r.releaseType).isPack).length,
   };
 
   // Filter and sort releases
@@ -212,7 +213,8 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
     } else if (qualityFilter === '720p') {
       if (!/720p/i.test(r.releaseType) && !/720p/i.test(r.title)) return false;
     } else if (qualityFilter === 'packs') {
-      if (!/season|pack/i.test(r.releaseType) && !/season|pack/i.test(r.title)) return false;
+      const isPack = r.releaseType.includes('📦') || detectSeasonPack(r.title).isPack || detectSeasonPack(r.releaseType).isPack;
+      if (!isPack) return false;
     }
 
     if (!searchQuery) return true;
@@ -604,10 +606,16 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
           {sortedReleases.map((rel) => {
             const isMagnetUrl = rel.sourceUrl && rel.sourceUrl.startsWith('magnet:');
             const isHttpUrl = rel.sourceUrl && (rel.sourceUrl.startsWith('http://') || rel.sourceUrl.startsWith('https://'));
+            const packInfo = detectSeasonPack(rel.title);
+            const isPack = packInfo.isPack || rel.releaseType.includes('📦');
             return (
               <div 
                 key={rel.id} 
-                className="p-4 bg-gray-50/70 hover:bg-indigo-50/40 rounded-2xl border border-gray-200/80 transition-all flex flex-col md:flex-row md:items-center justify-between gap-4 group"
+                className={`p-4 rounded-2xl border transition-all flex flex-col md:flex-row md:items-center justify-between gap-4 group ${
+                  isPack 
+                    ? 'bg-amber-50/40 hover:bg-amber-50/70 border-amber-200/80 shadow-xs' 
+                    : 'bg-gray-50/70 hover:bg-indigo-50/40 border-gray-200/80'
+                }`}
               >
                 <div className="space-y-2 min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
@@ -615,6 +623,13 @@ export default function MediaDetailView({ groupKey, onBack }: MediaDetailViewPro
                     <span className={`px-3 py-1 rounded-lg text-xs font-bold border shadow-xs ${getQualityBadgeColor(rel.releaseType)}`}>
                       {rel.releaseType}
                     </span>
+
+                    {/* Season Pack Distinct Badge */}
+                    {isPack && (
+                      <span className="px-2.5 py-0.5 bg-amber-500/15 text-amber-800 border border-amber-300 font-extrabold text-[11px] rounded-md flex items-center gap-1 shadow-2xs">
+                        📦 Complete Season Pack
+                      </span>
+                    )}
 
                     {/* Provider */}
                     <span className="text-xs text-gray-500 font-medium flex items-center gap-1">

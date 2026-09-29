@@ -3,11 +3,11 @@ const TelegramBot = (typeof TelegramBotModule === 'function')
   ? TelegramBotModule 
   : (TelegramBotModule as any).default;
 
-import { getSettings } from '../services/settings';
+import { getSettings, updateSettings } from '../services/settings';
 import { ReleaseItem } from '../utils/mediaGrouper';
 import { logInfo, logError, logSuccess, logWarning } from '../services/logger';
 import { getGroupKey, normalizeMediaTitle } from '../utils/mediaGrouper';
-import { extractEpisodeOrPack } from '../providers/downloadRadarProvider';
+import { extractEpisodeOrPack, detectSeasonPack } from '../providers/downloadRadarProvider';
 import { db } from '../database/db';
 import { watchlist, releases } from '../database/schema';
 import { desc, eq } from 'drizzle-orm';
@@ -15,6 +15,7 @@ import { runScan, syncWatchlistItemImmediately } from '../services/scanner';
 import { searchMedia } from '../metadata/tmdb';
 
 let bot: any = null;
+const activeAdminChatIds = new Set<string>();
 
 function escapeHtml(text: string): string {
   if (!text) return '';
@@ -50,9 +51,10 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
     return { success: false, error: 'Telegram bot disabled via configuration' };
   }
 
-  const token = customToken || process.env.TELEGRAM_BOT_TOKEN;
+  const dbSettings = await getSettings();
+  const token = customToken || process.env.TELEGRAM_BOT_TOKEN || dbSettings?.telegramBotToken;
   if (!token || !token.trim()) {
-    return { success: false, error: 'No Telegram bot token provided' };
+    return { success: false, error: 'No Telegram bot token provided in environment or settings' };
   }
 
   const cleanToken = token.trim();
@@ -65,19 +67,22 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
     const testRes = await fetch(`https://api.telegram.org/bot${cleanToken}/getMe`);
     const testData: any = await testRes.json();
     if (!testData.ok) {
-      return { success: false, error: testData.description || 'Invalid Telegram Bot Token' };
+      const errDescription = testData.description || 'Invalid Telegram Bot Token';
+      console.warn(`Telegram Token validation failed: ${errDescription}`);
+      await logWarning(`Telegram bot token validation failed: ${errDescription}`, 'Telegram');
+      return { success: false, error: errDescription };
     }
     const botUser = testData.result;
     process.env.TELEGRAM_BOT_TOKEN = cleanToken;
+    if (dbSettings && dbSettings.telegramBotToken !== cleanToken) {
+      await updateSettings({ telegramBotToken: cleanToken });
+    }
 
-    // CRITICAL: Delete any stale webhooks from previous sessions.
-    // If a webhook was ever active, Telegram returns 409 Conflict and refuses to deliver updates to polling!
+    // Clear old webhook to guarantee reliable Long Polling
     try {
       await fetch(`https://api.telegram.org/bot${cleanToken}/deleteWebhook?drop_pending_updates=false`);
-      console.log('Deleted old Telegram webhook to guarantee reliable Long Polling.');
-    } catch (whErr) {
-      console.warn('Could not clear webhook:', whErr);
-    }
+      console.log('Cleared Telegram webhook for reliable polling.');
+    } catch (whErr) {}
 
     // Always use robust Long Polling. Long Polling works on Render, local, cloud, without open ports or HTTPS domain issues.
     bot = new TelegramBot(cleanToken, {
@@ -107,6 +112,19 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
 
     const chatSearchResults = new Map<number, any[]>();
     const chatSearchActive = new Set<number>();
+
+    const ensureAdminChatId = async (chatId: number | string) => {
+      if (!chatId) return;
+      const strId = String(chatId).trim();
+      activeAdminChatIds.add(strId);
+      try {
+        const s = await getSettings();
+        if (!s?.telegramChatId || s.telegramChatId.trim() !== strId) {
+          await updateSettings({ telegramChatId: strId });
+          console.log(`Auto-registered Telegram Chat ID ${strId} for notifications.`);
+        }
+      } catch (e) {}
+    };
 
     const PERSISTENT_KEYBOARD = {
       keyboard: [
@@ -421,6 +439,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
     // Initial welcome / entry handler (sends the clean inline button dashboard)
     bot.onText(/\/start/, async (msg: any) => {
       const chatId = msg.chat.id;
+      await ensureAdminChatId(chatId);
       await sendInlineMenu(chatId);
     });
 
@@ -429,6 +448,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       if (!msg.text) return;
       const text = msg.text.trim();
       const chatId = msg.chat.id;
+      await ensureAdminChatId(chatId);
 
       // Handle persistent button or any menu request
       if (text === '📋 Radar Menu' || text === '📋 Menu' || text === 'Menu' || text.startsWith('/')) {
@@ -455,6 +475,7 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       const data = query.data;
 
       if (!chatId || !data) return;
+      await ensureAdminChatId(chatId);
 
       if (data === 'action_choose_menu') {
         await sendInlineMenu(chatId, messageId);
@@ -591,119 +612,200 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
 export async function sendTelegramNotification(item: ReleaseItem) {
   try {
     const settings = await getSettings();
-    const targetChatId = settings?.telegramChatId || process.env.TELEGRAM_CHAT_ID;
-    if (bot && targetChatId) {
-      const canonicalTitle = normalizeMediaTitle(item.title);
-      const groupKey = getGroupKey(item.title, item.type);
-      const baseUrl = await getBaseUrl(settings);
-      const detailUrl = `${baseUrl}/#/media/${groupKey}`;
+    const token = (process.env.TELEGRAM_BOT_TOKEN || settings?.telegramBotToken || '').trim();
 
-      const yearSuffix = item.year ? ` (${item.year})` : '';
-      const isTV = item.type?.toLowerCase() === 'series' || item.type?.toLowerCase() === 'anime';
-      const isDownload = item.releaseType.includes('Download Available') || item.sourceUrl?.startsWith('magnet:');
-      const epCode = extractEpisodeOrPack(item.title) || extractEpisodeOrPack(item.releaseType);
+    const targetChatIds = new Set<string>();
+    if (settings?.telegramChatId?.trim()) targetChatIds.add(settings.telegramChatId.trim());
+    if (process.env.TELEGRAM_CHAT_ID?.trim()) targetChatIds.add(process.env.TELEGRAM_CHAT_ID.trim());
+    for (const id of activeAdminChatIds) targetChatIds.add(id.trim());
 
-      let headerTitle: string;
-      let bodyText: string;
+    if (!token) {
+      await logWarning('Telegram notification skipped: Bot Token is missing in Settings and environment.', 'Telegram');
+      return { success: false, error: 'Telegram Bot Token missing' };
+    }
+    if (targetChatIds.size === 0) {
+      await logWarning('Telegram notification skipped: No Telegram Chat ID registered yet. Please message your bot on Telegram or tap /start.', 'Telegram');
+      return { success: false, error: 'Telegram Chat ID missing' };
+    }
 
-      if (isTV && epCode) {
-        headerTitle = `🔥 <b>NEW EPISODE AVAILABLE!</b>`;
-        bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+    const canonicalTitle = normalizeMediaTitle(item.title);
+    const groupKey = getGroupKey(item.title, item.type);
+    const baseUrl = await getBaseUrl(settings);
+    const detailUrl = `${baseUrl}/#/media/${groupKey}`;
+
+    const yearSuffix = item.year ? ` (${item.year})` : '';
+    const isTV = item.type?.toLowerCase() === 'series' || item.type?.toLowerCase() === 'anime';
+    const isDownload = item.releaseType.includes('Download Available') || item.sourceUrl?.startsWith('magnet:');
+    const packInfo = detectSeasonPack(item.title);
+    const isSeasonPack = packInfo.isPack || item.releaseType.includes('📦') || item.releaseType.includes('Pack');
+    const epCode = extractEpisodeOrPack(item.title) || extractEpisodeOrPack(item.releaseType);
+
+    let headerTitle: string;
+    let bodyText: string;
+
+    if (isTV && isSeasonPack) {
+      const packLabel = packInfo.label || epCode || 'Complete Season Pack';
+      headerTitle = `📦 <b>FULL SEASON PACK AVAILABLE!</b>`;
+      bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+📦 <b>Pack:</b> <code>${escapeHtml(packLabel)}</code>
+🟢 <b>Status:</b> Whole Season Ready to Download on Web App
+
+🍿 <b>All Available Qualities (4K, 1080p, 720p):</b>
+<a href="${detailUrl}">${detailUrl}</a>`;
+    } else if (isTV && epCode) {
+      headerTitle = `🔥 <b>NEW EPISODE AVAILABLE!</b>`;
+      bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
 ⚡ <b>Episode:</b> <code>${escapeHtml(epCode)}</code>
 🟢 <b>Status:</b> Ready to download on the web app
 
 🍿 <b>All Available Qualities (4K, 1080p, 720p):</b>
 <a href="${detailUrl}">${detailUrl}</a>`;
-      } else if (isTV) {
-        headerTitle = `🔥 <b>NEW SHOW EPISODE AVAILABLE!</b>`;
-        bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+    } else if (isTV) {
+      headerTitle = `🔥 <b>NEW SHOW EPISODE AVAILABLE!</b>`;
+      bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
 🟢 <b>Status:</b> Ready to download on the web app
 
 🍿 <b>All Available Qualities & Episodes:</b>
 <a href="${detailUrl}">${detailUrl}</a>`;
-      } else if (isDownload) {
-        headerTitle = `🎬 <b>NEW MOVIE NOW AVAILABLE!</b>`;
-        bodyText = `🍿 <b>Movie:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+    } else if (isDownload) {
+      headerTitle = `🎬 <b>NEW MOVIE NOW AVAILABLE!</b>`;
+      bodyText = `🍿 <b>Movie:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
 🟢 <b>Status:</b> Ready to download on the web app
 
 👉 <b>All Available Qualities (4K, 1080p, 720p):</b>
 <a href="${detailUrl}">${detailUrl}</a>`;
-      } else {
-        headerTitle = `🎬 <b>Premiere & Release Alert!</b>`;
-        bodyText = `<b>Title:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+    } else {
+      headerTitle = `🎬 <b>Premiere & Release Alert!</b>`;
+      bodyText = `<b>Title:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
 <b>Status:</b> ${escapeHtml(item.releaseType)}
 
 👉 <a href="${detailUrl}">${detailUrl}</a>`;
-      }
+    }
 
-      const caption = `${headerTitle}\n\n${bodyText}`;
+    const caption = `${headerTitle}\n\n${bodyText}`;
 
-      // Clean interactive buttons: No torrent magnet sent on telegram, only direct web app button & quick actions
-      const inlineKeyboard: any[] = [
-        [{ text: '🍿 Open Qualities & Download', url: detailUrl }],
-        [
-          { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' },
-          { text: '🔄 Scan Now', callback_data: 'action_force_scan' }
-        ]
-      ];
+    const inlineKeyboard: any[] = [
+      [{ text: '🍿 Open Qualities & Download', url: detailUrl }],
+      [
+        { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' },
+        { text: '🔄 Scan Now', callback_data: 'action_force_scan' }
+      ]
+    ];
 
-      const options: any = {
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: inlineKeyboard
-        }
-      };
+    const replyMarkup = { inline_keyboard: inlineKeyboard };
 
+    let totalDelivered = 0;
+
+    for (const targetChatId of targetChatIds) {
+      // Try sending photo first if poster is an HTTP URL
       let sent = false;
-      if (item.poster) {
-        if (item.poster.startsWith('data:image/svg')) {
-          sent = false;
-        } else if (item.poster.startsWith('http://') || item.poster.startsWith('https://')) {
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000);
-            const imageRes = await fetch(item.poster, {
-              signal: controller.signal,
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-              }
-            });
-            clearTimeout(timeoutId);
-
-            if (imageRes.ok) {
-              const contentType = imageRes.headers.get('content-type');
-              if (contentType && contentType.startsWith('image/')) {
-                const arrayBuffer = await imageRes.arrayBuffer();
-                const buffer = Buffer.from(arrayBuffer);
-
-                await bot.sendPhoto(targetChatId, buffer, {
-                  caption,
-                  ...options
-                });
-                sent = true;
-              }
-            }
-          } catch (photoErr: any) {
-            sent = false;
+      if (item.poster && (item.poster.startsWith('http://') || item.poster.startsWith('https://'))) {
+        try {
+          const photoRes = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: targetChatId,
+              photo: item.poster,
+              caption,
+              parse_mode: 'HTML',
+              reply_markup: replyMarkup
+            })
+          });
+          const photoData: any = await photoRes.json();
+          if (photoData.ok) {
+            sent = true;
+            totalDelivered++;
+          } else {
+            console.warn(`Telegram sendPhoto failed for ${targetChatId} (${photoData.description}), falling back to sendMessage...`);
           }
+        } catch (photoErr) {
+          sent = false;
         }
       }
 
       if (!sent) {
-        await bot.sendMessage(targetChatId, caption, options);
+        try {
+          const msgRes = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: targetChatId,
+              text: caption,
+              parse_mode: 'HTML',
+              disable_web_page_preview: false,
+              reply_markup: replyMarkup
+            })
+          });
+          const msgData: any = await msgRes.json();
+          if (msgData.ok) {
+            totalDelivered++;
+          } else {
+            const errDesc = `Telegram alert failed for ${targetChatId} (${msgData.error_code}): ${msgData.description}`;
+            console.error(errDesc);
+            await logError(errDesc, 'Telegram');
+          }
+        } catch (msgErr: any) {
+          console.error(`Telegram sendMessage failed for ${targetChatId}:`, msgErr.message);
+        }
       }
+    }
 
-      console.log('Telegram notification sent successfully.');
-      await logSuccess(`Telegram alert sent: ${item.title} [${item.releaseType.slice(0, 30)}]`, 'Telegram');
+    if (totalDelivered > 0) {
+      console.log(`Telegram alert delivered to ${totalDelivered} chat(s) for "${canonicalTitle}".`);
+      await logSuccess(`Telegram alert sent: ${canonicalTitle} [${item.releaseType.slice(0, 30)}]`, 'Telegram');
       return { success: true };
     } else {
-      await logInfo(`Telegram notification skipped (No Chat ID or Bot not initialized)`, 'Telegram');
-      return { success: false, error: 'Telegram bot not initialized or Chat ID missing in Settings.' };
+      return { success: false, error: 'Failed to deliver notification to any chat ID' };
     }
   } catch (error: any) {
     console.error('Error sending Telegram notification:', error);
     await logError(`Telegram notification failed: ${error.message}`, 'Telegram');
     return { success: false, error: error.message };
+  }
+}
+
+export async function sendTestTelegramAlert(overrideToken?: string, overrideChatId?: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    const settings = await getSettings();
+    const token = (overrideToken || process.env.TELEGRAM_BOT_TOKEN || settings?.telegramBotToken || '').trim();
+    const chatId = (overrideChatId || settings?.telegramChatId || process.env.TELEGRAM_CHAT_ID || '').trim();
+
+    if (!token) {
+      return { success: false, error: 'Telegram Bot Token is missing. Enter it in Settings.' };
+    }
+    if (!chatId) {
+      return { success: false, error: 'Telegram Chat ID is missing. Enter it in Settings.' };
+    }
+
+    const testText = `🤖 <b>Release Radar Bot Connected!</b>\n\n✅ Your Telegram notification channel is active and verified.\n⚡ When new movie releases or show episodes drop, alerts will appear right here with 1-tap download links.`;
+
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: testText,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🍿 Open Release Radar Web App', url: await getBaseUrl(settings) }]
+          ]
+        }
+      })
+    });
+
+    const data: any = await res.json();
+    if (data.ok) {
+      await logSuccess(`Test alert successfully sent to Telegram chat ${chatId}`, 'Telegram');
+      return { success: true };
+    } else {
+      const err = `Telegram error (${data.error_code}): ${data.description}`;
+      await logWarning(`Test alert failed: ${err}`, 'Telegram');
+      return { success: false, error: data.description };
+    }
+  } catch (e: any) {
+    return { success: false, error: e.message };
   }
 }
 

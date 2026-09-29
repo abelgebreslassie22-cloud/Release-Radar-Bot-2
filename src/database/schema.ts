@@ -37,6 +37,7 @@ export const releases = pgTable('releases', {
 export const settings = pgTable('settings', {
   id: serial('id').primaryKey(),
   scanInterval: integer('scan_interval').default(10).notNull(), // minutes
+  telegramBotToken: text('telegram_bot_token'),
   telegramChatId: text('telegram_chat_id'),
   metadataApiKey: text('metadata_api_key'),
   debugMode: integer('debug_mode').default(0).notNull(), // 0 = off, 1 = on (using int for simple boolean in simple pg)

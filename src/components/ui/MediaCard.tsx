@@ -41,7 +41,12 @@ export const MediaCard: React.FC<MediaCardProps> = ({ group, onClick, onDelete }
           <Badge variant="default" className="bg-slate-900/80 backdrop-blur-md text-white border-none shadow-sm text-[11px] px-2 py-0.5">
             {group.type}
           </Badge>
-          {group.availableQualities[0] && (
+          {group.releases.some(r => r.releaseType.includes('📦')) && (
+            <Badge variant="default" className="bg-amber-500/95 backdrop-blur-md text-white border-none shadow-sm text-[10px] px-2 py-0.5 font-bold flex items-center gap-1">
+              📦 Season Pack
+            </Badge>
+          )}
+          {group.availableQualities[0] && !group.releases.some(r => r.releaseType.includes('📦')) && (
             <Badge variant="default" className="bg-indigo-600/90 backdrop-blur-md text-white border-none shadow-sm text-[11px] px-2 py-0.5 font-bold">
               {group.availableQualities[0]}
             </Badge>

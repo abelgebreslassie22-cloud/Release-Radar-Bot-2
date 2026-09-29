@@ -73,7 +73,7 @@ export default function SettingsView() {
 
       setForm({
         databaseUrl: '',
-        telegramBotToken: '',
+        telegramBotToken: settingsRes.telegramBotToken || '',
         telegramChatId: settingsRes.telegramChatId || envRes.telegramChatId || '',
         metadataApiKey: settingsRes.metadataApiKey || '',
         appUrl: loadedAppUrl,
@@ -215,10 +215,14 @@ export default function SettingsView() {
         body: JSON.stringify(form)
       });
       
-      const res = await fetch('/api/telegram/test', { method: 'POST' });
+      const res = await fetch('/api/telegram/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: form.telegramBotToken, chatId: form.telegramChatId })
+      });
       const data = await res.json();
       if (res.ok && data.success) {
-        toast('Test notification sent to Telegram!', 'success');
+        toast('Test notification sent to Telegram! Check your bot chat.', 'success');
       } else {
         toast(data.error || 'Failed to send Telegram test message', 'error');
       }

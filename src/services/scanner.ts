@@ -7,7 +7,7 @@ import { logInfo, logError, logWarning, logSuccess, logDebug } from './logger';
 import { Provider } from '../types';
 import { getStandardizedMatchKey, normalizeMediaTitle } from '../utils/mediaGrouper';
 import { generateCustomPoster } from '../utils/posterGenerator';
-import { DownloadRadarProvider, extractEpisodeOrPack } from '../providers/downloadRadarProvider';
+import { DownloadRadarProvider, extractEpisodeOrPack, detectSeasonPack } from '../providers/downloadRadarProvider';
 import { TMDBPremiereProvider } from '../providers/tmdbProvider';
 
 let isScanning = false;
@@ -50,13 +50,21 @@ export async function syncWatchlistItemImmediately(wl: { title: string; year: nu
     for (const dl of downloadMatches) {
       const alreadyHas = downloads.some(d => d.sourceUrl === dl.sourceUrl || d.title === dl.name);
       if (!alreadyHas) {
+        const packInfo = detectSeasonPack(dl.name);
         const ep = extractEpisodeOrPack(dl.name) || extractEpisodeOrPack(dl.quality);
         if (ep) episodeCodes.add(ep.toUpperCase());
+
+        let relType = `🟢 Download Available: ${dl.quality} (${dl.sizeText}) • ${dl.seeders} Seeds`;
+        if (packInfo.isPack && packInfo.label) {
+          relType = `📦 ${packInfo.label}: ${dl.quality} (${dl.sizeText}) • ${dl.seeders} Seeds`;
+        } else if (ep) {
+          relType = `🟢 Download Available: ${ep} ${dl.quality} (${dl.sizeText}) • ${dl.seeders} Seeds`;
+        }
 
         downloads.push({
           id: Date.now() + Math.floor(Math.random() * 10000),
           title: dl.name,
-          releaseType: `🟢 Download Available: ${dl.quality} (${dl.sizeText}) • ${dl.seeders} Seeds`,
+          releaseType: relType,
           sourceUrl: dl.magnetUrl,
           seeders: dl.seeders || 0,
           leechers: dl.leechers || 0,
@@ -326,17 +334,17 @@ export async function runScan() {
             : []
         );
 
-        // Also add any episodes already in currentDownloads to notifiedEpisodes so we never re-alert
-        for (const d of currentDownloads) {
-          const ep = extractEpisodeOrPack(d.title) || extractEpisodeOrPack(d.releaseType);
-          if (ep) notifiedEpisodes.add(ep.toUpperCase());
-        }
-
-        let notifiedMovie = Boolean(cardMeta.notifiedMovie) || (!isTV && currentDownloads.length > 0);
+        let notifiedMovie = Boolean(cardMeta.notifiedMovie);
         let newlyDiscoveredCount = 0;
         const newEpisodeNotifications: any[] = [];
 
         for (const dl of matchingDlItems) {
+          const packInfo = detectSeasonPack(dl.title);
+          let relType = dl.releaseType;
+          if (packInfo.isPack && packInfo.label && !relType.includes('📦')) {
+            relType = `📦 ${packInfo.label}: ${relType.replace(/^(?:🟢\s*Download Available:\s*)/i, '')}`;
+          }
+
           const existingIdx = currentDownloads.findIndex(d => 
             d.sourceUrl === dl.sourceUrl || d.title === dl.title
           );
@@ -344,13 +352,13 @@ export async function runScan() {
           if (existingIdx !== -1) {
             currentDownloads[existingIdx].seeders = dl.seeders || 0;
             currentDownloads[existingIdx].leechers = dl.leechers || 0;
-            currentDownloads[existingIdx].releaseType = dl.releaseType;
+            currentDownloads[existingIdx].releaseType = relType;
           } else {
             // Append new quality release to this movie's downloads
             const newDl = {
               id: Date.now() + Math.floor(Math.random() * 10000),
               title: dl.title,
-              releaseType: dl.releaseType,
+              releaseType: relType,
               sourceUrl: dl.sourceUrl,
               seeders: dl.seeders || 0,
               leechers: dl.leechers || 0,
@@ -358,48 +366,62 @@ export async function runScan() {
             };
             currentDownloads.push(newDl);
             newlyDiscoveredCount++;
+          }
 
-            // Strict notification logic:
-            // 1. If this title is undergoing its initial sync, DO NOT notify (zero alert spam on addition!)
-            // 2. If it's a TV show and not initial sync: notify ONE TIME only when a brand-new episode drops!
-            // 3. If it's a movie and not initial sync: notify ONE TIME only when the movie first becomes downloadable!
-            if (!isInitialSync) {
-              if (isTV) {
-                const ep = extractEpisodeOrPack(dl.title) || extractEpisodeOrPack(dl.releaseType);
-                const epKey = ep ? ep.toUpperCase() : null;
-                if (epKey && !notifiedEpisodes.has(epKey)) {
-                  // Brand new episode dropped!
-                  notifiedEpisodes.add(epKey);
-                  newEpisodeNotifications.push({
-                    ...movieCard,
-                    title: dl.title,
-                    releaseType: dl.releaseType,
-                    sourceUrl: dl.sourceUrl,
-                    poster: posterUrl || movieCard.poster
-                  });
-                  await logSuccess(`🔥 Brand new episode dropped: ${wl.title} ${epKey}`, 'DownloadRadar');
+          // Strict notification logic:
+          // 1. If this title is undergoing its initial sync, DO NOT notify (zero alert spam on addition!)
+          // 2. If it's a TV show and not initial sync: notify ONE TIME only when a brand-new episode drops!
+          // 3. If it's a movie and not initial sync: notify ONE TIME only when the movie first becomes downloadable!
+          if (!isInitialSync) {
+            if (isTV) {
+              let ep = extractEpisodeOrPack(dl.title) || extractEpisodeOrPack(dl.releaseType);
+              if (!ep) {
+                const epNumMatch = dl.title.match(/\b(?:E|EP|Episode|#)\s*0*(\d{1,3})\b/i);
+                if (epNumMatch) {
+                  ep = `E${epNumMatch[1].padStart(2, '0')}`;
                 }
-              } else {
-                if (!notifiedMovie && newEpisodeNotifications.length === 0) {
-                  notifiedMovie = true;
-                  newEpisodeNotifications.push({
-                    ...movieCard,
-                    title: dl.title,
-                    releaseType: dl.releaseType,
-                    sourceUrl: dl.sourceUrl,
-                    poster: posterUrl || movieCard.poster
-                  });
-                  await logSuccess(`🔥 Movie newly available: ${wl.title}`, 'DownloadRadar');
+              }
+              const epKey = ep ? ep.toUpperCase() : null;
+              if (epKey && !notifiedEpisodes.has(epKey)) {
+                // Brand new episode or complete season pack dropped!
+                notifiedEpisodes.add(epKey);
+                newEpisodeNotifications.push({
+                  ...movieCard,
+                  title: dl.title,
+                  releaseType: relType,
+                  sourceUrl: dl.sourceUrl,
+                  poster: posterUrl || movieCard.poster
+                });
+                if (packInfo.isPack) {
+                  await logSuccess(`📦 Complete Season Pack dropped: ${wl.title} [${packInfo.label}]`, 'DownloadRadar');
+                } else {
+                  await logSuccess(`🔥 Brand new episode dropped: ${wl.title} ${epKey}`, 'DownloadRadar');
                 }
               }
             } else {
-              // During initial sync, register all existing episodes so they never trigger future notifications
-              if (isTV) {
-                const ep = extractEpisodeOrPack(dl.title) || extractEpisodeOrPack(dl.releaseType);
-                if (ep) notifiedEpisodes.add(ep.toUpperCase());
-              } else {
+              if (!notifiedMovie && newEpisodeNotifications.length === 0) {
                 notifiedMovie = true;
+                newEpisodeNotifications.push({
+                  ...movieCard,
+                  title: dl.title,
+                  releaseType: dl.releaseType,
+                  sourceUrl: dl.sourceUrl,
+                  poster: posterUrl || movieCard.poster
+                });
+                await logSuccess(`🔥 Movie newly available: ${wl.title}`, 'DownloadRadar');
               }
+            }
+          } else {
+            // During initial sync, register all existing episodes so they never trigger future notifications
+            if (isTV) {
+              let ep = extractEpisodeOrPack(dl.title) || extractEpisodeOrPack(dl.releaseType);
+              if (!ep) {
+                const epNumMatch = dl.title.match(/\b(?:E|EP|Episode|#)\s*0*(\d{1,3})\b/i);
+                if (epNumMatch) ep = `E${epNumMatch[1].padStart(2, '0')}`;
+              }
+              if (ep) notifiedEpisodes.add(ep.toUpperCase());
+            } else {
+              notifiedMovie = true;
             }
           }
         }
@@ -446,6 +468,48 @@ export async function runScan() {
       } else {
         // No download files online yet: ensure card status is kept up to date
         const cardMeta = (movieCard.metadataJson as any) || {};
+        const isInitialSync = cardMeta.initialSyncCompleted !== true;
+        const notifiedEpisodes = new Set<string>(
+          Array.isArray(cardMeta.notifiedEpisodes)
+            ? cardMeta.notifiedEpisodes.map((e: string) => e.toUpperCase())
+            : []
+        );
+        let notifiedMovie = Boolean(cardMeta.notifiedMovie);
+
+        if (tmdbItem && !isInitialSync) {
+          if (isTV) {
+            let tmdbEp = extractEpisodeOrPack(tmdbItem.releaseType);
+            if (!tmdbEp) {
+              const tmdbEpMatch = tmdbItem.releaseType.match(/\b(?:S\d{1,2}E\d{1,2}|E\d{1,2})\b/i);
+              if (tmdbEpMatch) tmdbEp = tmdbEpMatch[0].toUpperCase();
+            }
+            const tmdbEpKey = tmdbEp ? tmdbEp.toUpperCase() : null;
+            if (tmdbEpKey && !notifiedEpisodes.has(tmdbEpKey)) {
+              notifiedEpisodes.add(tmdbEpKey);
+              notificationsToSend.push({
+                ...movieCard,
+                title: `${wl.title} - ${tmdbEpKey}`,
+                releaseType: tmdbItem.releaseType,
+                sourceUrl: tmdbItem.sourceUrl || movieCard.sourceUrl,
+                poster: posterUrl || movieCard.poster
+              });
+              await logSuccess(`🔥 TMDB airdate alert: ${wl.title} ${tmdbEpKey}`, 'TMDBRadar');
+            }
+          } else {
+            if (!notifiedMovie && (tmdbItem.releaseType.includes('Digital') || tmdbItem.releaseType.includes('Premiere: Today'))) {
+              notifiedMovie = true;
+              notificationsToSend.push({
+                ...movieCard,
+                title: wl.title,
+                releaseType: tmdbItem.releaseType,
+                sourceUrl: tmdbItem.sourceUrl || movieCard.sourceUrl,
+                poster: posterUrl || movieCard.poster
+              });
+              await logSuccess(`🔥 TMDB movie digital premiere alert: ${wl.title}`, 'TMDBRadar');
+            }
+          }
+        }
+
         const finalStatus = tmdbItem ? tmdbItem.releaseType : `🟡 Monitored (Searching for releases...)`;
         const finalSourceUrl = tmdbItem ? tmdbItem.sourceUrl : (metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`);
         const finalProvider = tmdbItem ? 'TMDB Premiere Radar' : 'Radar Monitor';
@@ -462,8 +526,8 @@ export async function runScan() {
             ...metadata,
             downloads: cardMeta.downloads || [],
             initialSyncCompleted: true,
-            notifiedEpisodes: cardMeta.notifiedEpisodes || [],
-            notifiedMovie: cardMeta.notifiedMovie || false
+            notifiedEpisodes: Array.from(notifiedEpisodes),
+            notifiedMovie
           },
           updatedAt: new Date()
         }).where(eq(releases.id, movieCard.id));

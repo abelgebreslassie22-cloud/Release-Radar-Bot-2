@@ -197,14 +197,16 @@ export function setupRoutes(app: Express) {
         return val.substring(0, 4) + '••••••••' + val.substring(val.length - 4);
       };
 
+      const activeToken = (settings?.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
+
       res.json({
         hasDatabaseUrl: !!process.env.DATABASE_URL,
         databaseUrlMasked: mask(process.env.DATABASE_URL),
         isDbConnected,
         dbError,
-        hasTelegramToken: !!process.env.TELEGRAM_BOT_TOKEN,
-        telegramTokenMasked: mask(process.env.TELEGRAM_BOT_TOKEN),
-        telegramChatId: settings?.telegramChatId || '',
+        hasTelegramToken: !!activeToken,
+        telegramTokenMasked: mask(activeToken),
+        telegramChatId: settings?.telegramChatId || process.env.TELEGRAM_CHAT_ID || '',
         metadataApiKeyMasked: mask(settings?.metadataApiKey || process.env.TMDB_API_KEY),
         appUrl: settings?.appUrl || process.env.APP_URL || '',
         providerType: settings?.providerType || 'TMDB',
@@ -360,12 +362,13 @@ export function setupRoutes(app: Express) {
         }
       }
 
-      // 3. Update Database Settings (ChatId, Metadata Key, AppUrl, Interval, Provider)
+      // 3. Update Database Settings (ChatId, Metadata Key, AppUrl, Interval, Provider, Bot Token)
       try {
         const updatePayload: any = {};
-        if (telegramChatId !== undefined) updatePayload.telegramChatId = telegramChatId;
-        if (metadataApiKey !== undefined) updatePayload.metadataApiKey = metadataApiKey;
-        if (appUrl !== undefined) updatePayload.appUrl = appUrl;
+        if (telegramBotToken !== undefined && telegramBotToken.trim()) updatePayload.telegramBotToken = telegramBotToken.trim();
+        if (telegramChatId !== undefined) updatePayload.telegramChatId = telegramChatId.trim();
+        if (metadataApiKey !== undefined) updatePayload.metadataApiKey = metadataApiKey.trim();
+        if (appUrl !== undefined) updatePayload.appUrl = appUrl.trim();
         if (scanInterval !== undefined) updatePayload.scanInterval = Number(scanInterval);
         if (providerType !== undefined) updatePayload.providerType = providerType;
         if (providerUrl !== undefined) updatePayload.providerUrl = providerUrl;
@@ -412,6 +415,22 @@ export function setupRoutes(app: Express) {
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message, results });
+    }
+  });
+
+  // Direct test telegram alert endpoint
+  app.post(['/api/config/test-alert', '/api/telegram/test'], async (req: Request, res: Response) => {
+    try {
+      const { token, chatId } = req.body || {};
+      const { sendTestTelegramAlert } = await import('../telegram/bot');
+      const result = await sendTestTelegramAlert(token, chatId);
+      if (result.success) {
+        res.json({ success: true, message: 'Test alert sent! Check your Telegram chat.' });
+      } else {
+        res.status(400).json({ error: result.error || 'Failed to send test alert' });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
