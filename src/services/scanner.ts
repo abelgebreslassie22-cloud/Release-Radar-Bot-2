@@ -9,6 +9,7 @@ import { getStandardizedMatchKey, normalizeMediaTitle } from '../utils/mediaGrou
 import { generateCustomPoster } from '../utils/posterGenerator';
 import { DownloadRadarProvider, extractEpisodeOrPack, detectSeasonPack } from '../providers/downloadRadarProvider';
 import { TMDBPremiereProvider } from '../providers/tmdbProvider';
+import { TVMazeProvider } from '../providers/tvmazeProvider';
 
 let isScanning = false;
 
@@ -202,11 +203,12 @@ export async function runScan() {
 
     await logInfo(`Searching ${items.length} watchlist item(s) across download indexers & premiere radar...`, 'Scanner');
 
-    // 1. Always initialize DownloadRadarProvider (Scene & Web Release Indexer)
+    // 1. Initialize DownloadRadarProvider, TMDBPremiereProvider, and TVMazeProvider
     const downloadRadar = new DownloadRadarProvider();
     const tmdbRadar = new TMDBPremiereProvider();
+    const tvmazeRadar = new TVMazeProvider();
 
-    // Scan for downloads
+    // Scan for downloads across multi-mirror scene & web indexers
     let downloadItems: any[] = [];
     try {
       await logInfo('Checking scene release indexers for available downloads...', 'DownloadRadar');
@@ -216,7 +218,15 @@ export async function runScan() {
       await logWarning(`Download radar scan failed: ${e.message}`, 'DownloadRadar');
     }
 
-    // Scan TMDB for streaming/air-dates/metadata
+    // Scan TVMaze for live broadcast & streaming air-dates (unblocked on cloud hosting)
+    let tvmazeItems: any[] = [];
+    try {
+      tvmazeItems = await tvmazeRadar.scan(items);
+    } catch (e: any) {
+      await logWarning(`TVMaze radar scan failed: ${e.message}`, 'TVMazeRadar');
+    }
+
+    // Scan TMDB for movie digital release dates, physical releases & streaming providers
     let tmdbItems: any[] = [];
     try {
       tmdbItems = await tmdbRadar.scan(items);
@@ -245,7 +255,13 @@ export async function runScan() {
         return normDTitle === normWlTitle || normDTitle.startsWith(normWlTitle) || normWlTitle.startsWith(normDTitle);
       });
 
-      // Check TMDB premiere / streaming status
+      // Check TVMaze broadcast & streaming status
+      const tvmazeItem = tvmazeItems.find(t => {
+        const normTTitle = normalizeMediaTitle(t.title).toLowerCase().replace(/[^a-z0-9]/g, '');
+        return normTTitle === normWlTitle || normTTitle.includes(normWlTitle) || normWlTitle.includes(normTTitle);
+      });
+
+      // Check TMDB premiere / digital release status
       const tmdbItem = tmdbItems.find(t => {
         const normTTitle = normalizeMediaTitle(t.title).toLowerCase().replace(/[^a-z0-9]/g, '');
         return normTTitle === normWlTitle || normTTitle.includes(normWlTitle) || normWlTitle.includes(normTTitle);
@@ -476,43 +492,53 @@ export async function runScan() {
         );
         let notifiedMovie = Boolean(cardMeta.notifiedMovie);
 
-        if (tmdbItem && !isInitialSync) {
+        // Streaming/broadcast premiere checking (TVMaze and TMDB)
+        const streamItem = tvmazeItem || tmdbItem;
+
+        if (streamItem && !isInitialSync) {
           if (isTV) {
-            let tmdbEp = extractEpisodeOrPack(tmdbItem.releaseType);
-            if (!tmdbEp) {
-              const tmdbEpMatch = tmdbItem.releaseType.match(/\b(?:S\d{1,2}E\d{1,2}|E\d{1,2})\b/i);
-              if (tmdbEpMatch) tmdbEp = tmdbEpMatch[0].toUpperCase();
+            let epCode = extractEpisodeOrPack(streamItem.title) || extractEpisodeOrPack(streamItem.releaseType);
+            if (!epCode) {
+              const epMatch = (streamItem.title + ' ' + streamItem.releaseType).match(/\bS(\d{1,2})E(\d{1,2})\b/i);
+              if (epMatch) epCode = `S${epMatch[1].padStart(2, '0')}E${epMatch[2].padStart(2, '0')}`;
             }
-            const tmdbEpKey = tmdbEp ? tmdbEp.toUpperCase() : null;
-            if (tmdbEpKey && !notifiedEpisodes.has(tmdbEpKey)) {
-              notifiedEpisodes.add(tmdbEpKey);
+            const epKey = epCode ? epCode.toUpperCase() : null;
+            if (epKey && !notifiedEpisodes.has(epKey)) {
+              notifiedEpisodes.add(epKey);
               notificationsToSend.push({
                 ...movieCard,
-                title: `${wl.title} - ${tmdbEpKey}`,
-                releaseType: tmdbItem.releaseType,
-                sourceUrl: tmdbItem.sourceUrl || movieCard.sourceUrl,
-                poster: posterUrl || movieCard.poster
+                title: `${wl.title} ${epKey}`,
+                releaseType: streamItem.releaseType,
+                sourceUrl: streamItem.sourceUrl || movieCard.sourceUrl,
+                poster: streamItem.poster || posterUrl || movieCard.poster,
+                provider: streamItem.provider || 'Streaming Premiere Radar'
               });
-              await logSuccess(`🔥 TMDB airdate alert: ${wl.title} ${tmdbEpKey}`, 'TMDBRadar');
+              await logSuccess(`🔥 Streaming/Broadcast alert: ${wl.title} ${epKey} (${streamItem.provider})`, 'Scanner');
             }
           } else {
-            if (!notifiedMovie && (tmdbItem.releaseType.includes('Digital') || tmdbItem.releaseType.includes('Premiere: Today'))) {
+            // Movies: notify on digital/VOD premiere or streaming availability
+            const isDigitalOut = streamItem.releaseType.includes('Digital') || 
+                                streamItem.releaseType.includes('Stream') || 
+                                streamItem.releaseType.includes('VOD') ||
+                                streamItem.releaseType.includes('Blu-ray');
+            if (!notifiedMovie && isDigitalOut) {
               notifiedMovie = true;
               notificationsToSend.push({
                 ...movieCard,
                 title: wl.title,
-                releaseType: tmdbItem.releaseType,
-                sourceUrl: tmdbItem.sourceUrl || movieCard.sourceUrl,
-                poster: posterUrl || movieCard.poster
+                releaseType: streamItem.releaseType,
+                sourceUrl: streamItem.sourceUrl || movieCard.sourceUrl,
+                poster: streamItem.poster || posterUrl || movieCard.poster,
+                provider: streamItem.provider || 'Digital VOD Radar'
               });
-              await logSuccess(`🔥 TMDB movie digital premiere alert: ${wl.title}`, 'TMDBRadar');
+              await logSuccess(`🔥 Movie Digital / Streaming alert: ${wl.title}`, 'Scanner');
             }
           }
         }
 
-        const finalStatus = tmdbItem ? tmdbItem.releaseType : `🟡 Monitored (Searching for releases...)`;
-        const finalSourceUrl = tmdbItem ? tmdbItem.sourceUrl : (metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`);
-        const finalProvider = tmdbItem ? 'TMDB Premiere Radar' : 'Radar Monitor';
+        const finalStatus = streamItem ? streamItem.releaseType : `🟡 Monitored (Searching for releases...)`;
+        const finalSourceUrl = streamItem ? streamItem.sourceUrl : (metadata?.sourceUrl || `https://www.themoviedb.org/search?query=${encodeURIComponent(wl.title)}`);
+        const finalProvider = streamItem ? streamItem.provider : 'Radar Monitor';
 
         await db.update(releases).set({
           title: wl.title,

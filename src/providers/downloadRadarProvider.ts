@@ -150,45 +150,57 @@ export class DownloadRadarProvider implements Provider {
       }
     };
 
-    // 2. EZTV API (Specialized for TV shows, reliable on Render)
+    // 2. EZTV API (Multi-mirror for TV shows with high cloud reliability)
     const fetchEZTV = async () => {
       if (!isTV) return;
-      try {
-        const url = `https://eztv.re/api/get-torrents?limit=50&page=1`;
-        // Search EZTV for matching series
-        const res = await axios.get(url, { timeout: 5000, headers: BROWSER_HEADERS });
-        const items = res.data?.torrents || [];
-        const normQuery = cleanTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const eztvMirrors = [
+        'https://eztvx.to/api/get-torrents?limit=50&page=1',
+        'https://eztv.re/api/get-torrents?limit=50&page=1',
+        'https://eztv.wf/api/get-torrents?limit=50&page=1'
+      ];
 
-        for (const item of items) {
-          if (!item.title || !item.magnet_url) continue;
-          const name = item.title;
-          const normName = name.toLowerCase().replace(/[^a-z0-9]/g, '');
-          if (!normName.includes(normQuery)) continue;
+      for (const mirrorUrl of eztvMirrors) {
+        try {
+          const res = await axios.get(mirrorUrl, { timeout: 4000, headers: BROWSER_HEADERS });
+          const items = res.data?.torrents || [];
+          if (!Array.isArray(items) || items.length === 0) continue;
 
-          const sizeBytes = parseInt(item.size_bytes || '0', 10);
-          const quality = extractQuality(name);
-          const episodeCode = extractEpisodeOrPack(name) || (item.season && item.episode ? `S${String(item.season).padStart(2, '0')}E${String(item.episode).padStart(2, '0')}` : undefined);
-          const hashMatch = item.magnet_url.match(/btih:([a-fA-F0-9]{40})/i);
-          const infoHash = hashMatch ? hashMatch[1].toLowerCase() : item.hash || '';
+          const normQuery = cleanTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+          let foundCount = 0;
 
-          addMatch({
-            title,
-            name,
-            quality,
-            sizeText: formatBytes(sizeBytes),
-            sizeBytes,
-            seeders: parseInt(item.seeds || '0', 10),
-            leechers: parseInt(item.peers || '0', 10),
-            infoHash,
-            magnetUrl: item.magnet_url,
-            sourceUrl: item.magnet_url,
-            uploadedAt: item.date_released_unix ? new Date(item.date_released_unix * 1000) : undefined,
-            episodeCode
-          });
+          for (const item of items) {
+            if (!item.title || !item.magnet_url) continue;
+            const name = item.title;
+            const normName = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (!normName.includes(normQuery)) continue;
+
+            const sizeBytes = parseInt(item.size_bytes || '0', 10);
+            const quality = extractQuality(name);
+            const episodeCode = extractEpisodeOrPack(name) || (item.season && item.episode ? `S${String(item.season).padStart(2, '0')}E${String(item.episode).padStart(2, '0')}` : undefined);
+            const hashMatch = item.magnet_url.match(/btih:([a-fA-F0-9]{40})/i);
+            const infoHash = hashMatch ? hashMatch[1].toLowerCase() : item.hash || '';
+
+            addMatch({
+              title,
+              name,
+              quality,
+              sizeText: formatBytes(sizeBytes),
+              sizeBytes,
+              seeders: parseInt(item.seeds || '0', 10),
+              leechers: parseInt(item.peers || '0', 10),
+              infoHash,
+              magnetUrl: item.magnet_url,
+              sourceUrl: item.magnet_url,
+              uploadedAt: item.date_released_unix ? new Date(item.date_released_unix * 1000) : undefined,
+              episodeCode
+            });
+            foundCount++;
+          }
+
+          if (foundCount > 0) break; // mirror succeeded with results
+        } catch (e: any) {
+          // Try next mirror
         }
-      } catch (e: any) {
-        // Fallback continues
       }
     };
 
@@ -248,41 +260,50 @@ export class DownloadRadarProvider implements Provider {
       }
     };
 
-    // 4. YTS Movie API (For movies: high-speed 720p, 1080p, 4K releases)
+    // 4. YTS Movie API (Multi-mirror for movies with cloud fallback)
     const fetchYTS = async () => {
       if (isTV) return;
-      try {
-        const url = `https://yts.mx/api/v2/list_movies.json?query_term=${encodeURIComponent(cleanTitle)}&limit=10`;
-        const res = await axios.get(url, { timeout: 4500, headers: BROWSER_HEADERS });
-        const movies = res.data?.data?.movies || [];
+      const ytsMirrors = ['https://yts.lt', 'https://yts.am', 'https://yts.bz', 'https://yts.mx'];
 
-        for (const m of movies) {
-          if (!m.title || !Array.isArray(m.torrents)) continue;
-          if (year && Math.abs(m.year - year) > 1) continue;
+      for (const baseMirror of ytsMirrors) {
+        try {
+          const url = `${baseMirror}/api/v2/list_movies.json?query_term=${encodeURIComponent(cleanTitle)}&limit=10`;
+          const res = await axios.get(url, { timeout: 3500, headers: BROWSER_HEADERS });
+          const movies = res.data?.data?.movies || [];
+          if (!Array.isArray(movies) || movies.length === 0) continue;
 
-          for (const t of m.torrents) {
-            if (!t.hash) continue;
-            const releaseName = `${m.title} (${m.year}) [${t.quality}] [${t.type || 'WEBRip'}] [YTS]`;
-            const sizeBytes = t.size_bytes || 0;
-            const magnetUrl = createMagnet(t.hash, releaseName);
+          let foundCount = 0;
+          for (const m of movies) {
+            if (!m.title || !Array.isArray(m.torrents)) continue;
+            if (year && Math.abs(m.year - year) > 1) continue;
 
-            addMatch({
-              title,
-              name: releaseName,
-              quality: `${t.quality} ${t.type || 'WEB-DL'}`,
-              sizeText: t.size || formatBytes(sizeBytes),
-              sizeBytes,
-              seeders: t.seeds || 0,
-              leechers: t.peers || 0,
-              infoHash: t.hash,
-              magnetUrl,
-              sourceUrl: magnetUrl,
-              uploadedAt: t.date_uploaded_unix ? new Date(t.date_uploaded_unix * 1000) : undefined
-            });
+            for (const t of m.torrents) {
+              if (!t.hash) continue;
+              const releaseName = `${m.title} (${m.year}) [${t.quality}] [${t.type || 'WEBRip'}] [YTS]`;
+              const sizeBytes = t.size_bytes || 0;
+              const magnetUrl = createMagnet(t.hash, releaseName);
+
+              addMatch({
+                title,
+                name: releaseName,
+                quality: `${t.quality} ${t.type || 'WEB-DL'}`,
+                sizeText: t.size || formatBytes(sizeBytes),
+                sizeBytes,
+                seeders: t.seeds || 0,
+                leechers: t.peers || 0,
+                infoHash: t.hash,
+                magnetUrl,
+                sourceUrl: magnetUrl,
+                uploadedAt: t.date_uploaded_unix ? new Date(t.date_uploaded_unix * 1000) : undefined
+              });
+              foundCount++;
+            }
           }
+
+          if (foundCount > 0) break; // mirror succeeded with releases
+        } catch (e: any) {
+          // Try next mirror
         }
-      } catch (e: any) {
-        // Fallback continues
       }
     };
 

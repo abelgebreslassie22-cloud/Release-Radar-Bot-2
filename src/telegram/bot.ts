@@ -639,6 +639,7 @@ export async function sendTelegramNotification(item: ReleaseItem) {
     const packInfo = detectSeasonPack(item.title);
     const isSeasonPack = packInfo.isPack || item.releaseType.includes('📦') || item.releaseType.includes('Pack');
     const epCode = extractEpisodeOrPack(item.title) || extractEpisodeOrPack(item.releaseType);
+    const isStreaming = item.provider?.includes('TVMaze') || item.provider?.includes('TMDB') || item.releaseType.includes('Stream') || item.releaseType.includes('Airing');
 
     let headerTitle: string;
     let bodyText: string;
@@ -653,17 +654,28 @@ export async function sendTelegramNotification(item: ReleaseItem) {
 🍿 <b>All Available Qualities (4K, 1080p, 720p):</b>
 <a href="${detailUrl}">${detailUrl}</a>`;
     } else if (isTV && epCode) {
-      headerTitle = `🔥 <b>NEW EPISODE AVAILABLE!</b>`;
-      bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+      if (isStreaming) {
+        headerTitle = `🎉 <b>NEW EPISODE RELEASED & STREAMING!</b>`;
+        bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+⚡ <b>Episode:</b> <code>${escapeHtml(epCode)}</code>
+📡 <b>Platform:</b> ${escapeHtml(item.provider || 'Streaming Network')}
+🟢 <b>Status:</b> ${escapeHtml(item.releaseType)}
+
+🍿 <b>Web App & Direct Download:</b>
+<a href="${detailUrl}">${detailUrl}</a>`;
+      } else {
+        headerTitle = `🔥 <b>NEW EPISODE AVAILABLE!</b>`;
+        bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
 ⚡ <b>Episode:</b> <code>${escapeHtml(epCode)}</code>
 🟢 <b>Status:</b> Ready to download on the web app
 
 🍿 <b>All Available Qualities (4K, 1080p, 720p):</b>
 <a href="${detailUrl}">${detailUrl}</a>`;
+      }
     } else if (isTV) {
-      headerTitle = `🔥 <b>NEW SHOW EPISODE AVAILABLE!</b>`;
+      headerTitle = `🔥 <b>NEW EPISODE AVAILABLE!</b>`;
       bodyText = `📺 <b>Show:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
-🟢 <b>Status:</b> Ready to download on the web app
+🟢 <b>Status:</b> ${escapeHtml(item.releaseType)}
 
 🍿 <b>All Available Qualities & Episodes:</b>
 <a href="${detailUrl}">${detailUrl}</a>`;
@@ -675,22 +687,50 @@ export async function sendTelegramNotification(item: ReleaseItem) {
 👉 <b>All Available Qualities (4K, 1080p, 720p):</b>
 <a href="${detailUrl}">${detailUrl}</a>`;
     } else {
-      headerTitle = `🎬 <b>Premiere & Release Alert!</b>`;
-      bodyText = `<b>Title:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
-<b>Status:</b> ${escapeHtml(item.releaseType)}
+      headerTitle = `🎬 <b>DIGITAL / STREAMING RELEASE!</b>`;
+      bodyText = `🍿 <b>Movie:</b> ${escapeHtml(canonicalTitle)}${yearSuffix}
+💎 <b>Status:</b> ${escapeHtml(item.releaseType)}
+📡 <b>Source:</b> Digital & Premiere Radar
 
-👉 <a href="${detailUrl}">${detailUrl}</a>`;
+👉 <b>Web App & Links:</b>
+<a href="${detailUrl}">${detailUrl}</a>`;
     }
 
     const caption = `${headerTitle}\n\n${bodyText}`;
 
+    // Generate 1-click external search URLs so the user can immediately grab releases
+    // even if cloud hosting IP was temporarily blocked by torrent indexers
+    const searchQuery = isTV && epCode 
+      ? `${canonicalTitle} ${epCode}` 
+      : `${canonicalTitle}${item.year ? ` ${item.year}` : ''}`;
+
+    const search1337x = `https://1337x.to/search/${encodeURIComponent(searchQuery)}/1/`;
+    const searchTPB = `https://thepiratebay.org/search.php?q=${encodeURIComponent(searchQuery)}`;
+    const searchEZTV = `https://eztvx.to/search/${encodeURIComponent(canonicalTitle)}`;
+    const searchYTS = `https://yts.mx/browse-movies/${encodeURIComponent(canonicalTitle)}`;
+
     const inlineKeyboard: any[] = [
-      [{ text: '🍿 Open Qualities & Download', url: detailUrl }],
-      [
-        { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' },
-        { text: '🔄 Scan Now', callback_data: 'action_force_scan' }
-      ]
+      [{ text: '🍿 Open Qualities in Web App', url: detailUrl }],
     ];
+
+    if (isTV) {
+      inlineKeyboard.push([
+        { text: '🔍 1337x', url: search1337x },
+        { text: '🏴‍☠️ PirateBay', url: searchTPB },
+        { text: '⚡ EZTV', url: searchEZTV },
+      ]);
+    } else {
+      inlineKeyboard.push([
+        { text: '🔍 1337x', url: search1337x },
+        { text: '🏴‍☠️ PirateBay', url: searchTPB },
+        { text: '🍿 YTS', url: searchYTS },
+      ]);
+    }
+
+    inlineKeyboard.push([
+      { text: '📋 My Watchlist', callback_data: 'menu_watchlist_0' },
+      { text: '🔄 Scan Now', callback_data: 'action_force_scan' }
+    ]);
 
     const replyMarkup = { inline_keyboard: inlineKeyboard };
 
