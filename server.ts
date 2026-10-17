@@ -2,9 +2,8 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { setupRoutes } from './src/api/routes';
-import { startScheduler } from './src/scheduler/cron';
-import { initTelegramBot } from './src/telegram/bot';
 import { initializeSettings } from './src/services/settings';
+import { supervisor } from './src/services/keepalive';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import dns from 'dns';
@@ -18,15 +17,25 @@ dotenv.config();
 const INSTANCE_ID = crypto.randomBytes(4).toString('hex');
 console.log(`Starting Application Instance ID: ${INSTANCE_ID}`);
 
+// Handle uncaught exceptions gracefully to prevent container restart
+process.on('uncaughtException', (err) => {
+  console.error('[Process UncaughtException]', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process UnhandledRejection]', reason);
+});
+
 async function startServer() {
   const app = express();
   const PORT = parseInt(process.env.PORT || '3000', 10);
 
+  // Trust proxy for Google Cloud Run & Render so req.headers['x-forwarded-*'] are parsed
+  app.set('trust proxy', true);
+
   app.use(express.json());
 
-  // Immediate health check
-  app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }));
-  
+  // Setup all API routes & health endpoints
   setupRoutes(app);
 
   if (process.env.NODE_ENV !== 'production') {
@@ -44,30 +53,32 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    console.log(`[Server] Release Radar listening on http://0.0.0.0:${PORT}`);
     
-    // Non-blocking background service initialization
+    // Autonomous Multi-Tier Background Supervisor Initialization
     (async () => {
       try {
         if (process.env.DATABASE_URL) {
-          console.log('Connecting to PostgreSQL database...');
+          console.log('[Database] Connecting to PostgreSQL database...');
           await ensureDatabaseSchema();
           import('./src/services/logger').then(({ logSuccess, logInfo }) => {
             logSuccess('Database connected successfully', 'Database');
             logInfo(`Application Instance ID: ${INSTANCE_ID}`, 'System');
           }).catch(() => {});
           await initializeSettings(INSTANCE_ID);
-          startScheduler();
-          initTelegramBot();
         } else {
-          console.warn('DATABASE_URL not set yet. Configure it via UI Settings.');
+          console.warn('[Database] DATABASE_URL not set yet. Running in bootstrap mode.');
         }
+
+        // Start 24/7 Supervisor, Bot, Cron Scheduler, Ingress Loop, and Watchdog
+        await supervisor.startSupervisor();
       } catch (error: any) {
-        console.warn('Non-fatal: Database initialization postponed until valid connection is saved:', error?.message || error);
+        console.warn('Non-fatal: Background initialization handled:', error?.message || error);
+        // Even if database has a temporary issue, keep supervisor active
+        await supervisor.startSupervisor().catch(() => {});
       }
     })();
   });
 }
 
 startServer();
-

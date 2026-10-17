@@ -11,7 +11,10 @@ import {
   HeartPulse,
   Menu,
   X,
-  ScrollText
+  ScrollText,
+  ShieldCheck,
+  Sparkles,
+  Calendar
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn } from '../../utils/cn';
@@ -27,15 +30,18 @@ export default function Sidebar({ currentView, setCurrentView, isMobileOpen, set
   
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'discover', label: 'Discover New Drops', icon: Sparkles },
+    { id: 'calendar', label: 'Drop Calendar', icon: Calendar },
     { id: 'watchlist', label: 'Watchlist', icon: ListPlus },
     { id: 'releases', label: 'Recent Releases', icon: Film },
     { id: 'movies', label: 'Movies', icon: Film },
     { id: 'series', label: 'Series', icon: Tv },
-    { id: 'anime', label: 'Anime', icon: MonitorPlay },
     { id: 'animation', label: 'Animation', icon: Library },
+    { id: 'anime', label: 'Anime', icon: MonitorPlay },
     { id: 'documentaries', label: 'Documentaries', icon: Library },
     { id: 'settings', label: 'Settings', icon: SettingsIcon },
     { id: 'health', label: 'Health Status', icon: HeartPulse },
+    { id: 'keepalive', label: '24/7 Keep-Alive', icon: ShieldCheck },
     { id: 'logs', label: 'Logs', icon: ScrollText },
   ];
 
@@ -71,7 +77,7 @@ export default function Sidebar({ currentView, setCurrentView, isMobileOpen, set
           <div>
             <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3 px-3">Overview</div>
             <nav className="space-y-1">
-              {navItems.slice(0, 3).map(item => (
+              {navItems.slice(0, 5).map(item => (
                 <NavItem 
                   key={item.id}
                   active={currentView === item.id} 
@@ -86,7 +92,7 @@ export default function Sidebar({ currentView, setCurrentView, isMobileOpen, set
           <div>
             <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3 px-3">Categories</div>
             <nav className="space-y-1">
-              {navItems.slice(3, 8).map(item => (
+              {navItems.slice(5, 10).map(item => (
                 <NavItem 
                   key={item.id}
                   active={currentView === item.id} 
@@ -101,7 +107,7 @@ export default function Sidebar({ currentView, setCurrentView, isMobileOpen, set
           <div>
             <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3 px-3">System</div>
             <nav className="space-y-1">
-              {navItems.slice(8).map(item => (
+              {navItems.slice(10).map(item => (
                 <NavItem 
                   key={item.id}
                   active={currentView === item.id} 

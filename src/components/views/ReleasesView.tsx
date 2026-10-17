@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { format, isToday, isYesterday } from 'date-fns';
-import { Search, Filter, Film } from 'lucide-react';
+import { Search, Filter, Film, Calendar, Flame } from 'lucide-react';
 import { Skeleton } from '../ui/Skeleton';
-import { groupReleases, MediaGroup, ReleaseItem } from '../../utils/mediaGrouper';
+import { groupReleases, normalizeMediaTitle, MediaGroup, ReleaseItem } from '../../utils/mediaGrouper';
 import { MediaCard } from '../ui/MediaCard';
 import { useToast } from '../ui/Toast';
 import { ConfirmModal } from '../ui/ConfirmModal';
@@ -43,13 +43,32 @@ export default function ReleasesView({ onSelectMedia }: ReleasesViewProps) {
       const res = await fetch('/api/releases/delete-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids }),
+        body: JSON.stringify({ 
+          ids, 
+          dbReleaseIds: deleteTarget.dbReleaseIds,
+          canonicalTitle: deleteTarget.canonicalTitle,
+          groupKey: deleteTarget.groupKey,
+          rawTitles: deleteTarget.releases.map(r => r.title)
+        }),
       });
       const data = await res.json();
       if (res.ok && data.success) {
         toast(`Deleted "${deleteTarget.canonicalTitle}"`, 'success');
-        const idsSet = new Set(ids);
-        setRawReleases(prev => prev.filter(r => !idsSet.has(r.id)));
+        const idsSet = new Set([
+          ...ids.map(String),
+          ...(deleteTarget.dbReleaseIds || []).map(String)
+        ]);
+        const targetTitle = deleteTarget.canonicalTitle.toLowerCase();
+        const targetGroupKey = deleteTarget.groupKey.toLowerCase();
+
+        setRawReleases(prev => prev.filter(r => {
+          if (idsSet.has(String(r.id))) return false;
+          const rCanonical = normalizeMediaTitle(r.title).toLowerCase();
+          if (rCanonical === targetTitle || r.title.toLowerCase() === targetTitle) return false;
+          const rCleanKey = rCanonical.replace(/[^a-z0-9]/g, '');
+          if (rCleanKey === targetGroupKey) return false;
+          return true;
+        }));
       } else {
         toast(data.error || 'Failed to delete release', 'error');
       }
@@ -122,13 +141,17 @@ export default function ReleasesView({ onSelectMedia }: ReleasesViewProps) {
 
       {loading ? (
         <div className="space-y-6">
-          <h3 className="text-lg font-semibold text-gray-700">Loading...</h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-            {[1, 2, 3, 4, 5].map(i => (
-              <div key={i} className="space-y-3">
-                <Skeleton className="w-full aspect-[2/3] rounded-xl" />
+          <h3 className="text-lg font-semibold text-gray-700">Loading releases...</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+            {[1, 2, 3, 4].map(i => (
+              <div key={i} className="bg-white rounded-2xl border border-gray-100 p-4 space-y-3">
+                <Skeleton className="w-full aspect-2/3 rounded-xl" />
                 <Skeleton className="h-4 w-3/4" />
                 <Skeleton className="h-3 w-1/2" />
+                <div className="flex gap-2 pt-2">
+                  <Skeleton className="h-6 w-16 rounded-md" />
+                  <Skeleton className="h-6 w-16 rounded-md" />
+                </div>
               </div>
             ))}
           </div>
@@ -142,25 +165,46 @@ export default function ReleasesView({ onSelectMedia }: ReleasesViewProps) {
           <p className="text-gray-500 text-sm">Add items to your watchlist or trigger a scan to discover releases.</p>
         </div>
       ) : (
-        (Object.entries(groupedByDate) as [string, MediaGroup[]][]).map(([dateLabel, groups]) => (
-          <div key={dateLabel} className="space-y-4">
-            <h3 className="text-lg font-bold text-gray-900 flex items-center gap-3">
-              {dateLabel}
-              <span className="text-xs font-normal text-gray-400">({groups.length} titles)</span>
-              <span className="flex-1 h-px bg-gray-100" />
-            </h3>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-              {groups.map(group => (
-                <MediaCard 
-                  key={group.groupKey} 
-                  group={group} 
-                  onClick={() => handleCardClick(group.groupKey)} 
-                  onDelete={handleDeleteClick}
-                />
-              ))}
+        (Object.entries(groupedByDate) as [string, MediaGroup[]][]).map(([dateLabel, groups]) => {
+          const hasNewEps = groups.some(g => g.hasNewEpisodeToday);
+
+          return (
+            <div key={dateLabel} className="space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-indigo-600" />
+                  <h3 className="text-lg font-bold text-gray-900 tracking-tight">
+                    {dateLabel}
+                  </h3>
+                </div>
+
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
+                  {groups.length} {groups.length === 1 ? 'title' : 'titles'}
+                </span>
+
+                {hasNewEps && (
+                  <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-200 flex items-center gap-1 shadow-2xs">
+                    <Flame className="w-3.5 h-3.5 text-amber-600 fill-amber-500" />
+                    New Episode Drops
+                  </span>
+                )}
+
+                <div className="h-px bg-gray-200/70 flex-1" />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                {groups.map(group => (
+                  <MediaCard 
+                    key={group.groupKey} 
+                    group={group} 
+                    onClick={() => handleCardClick(group.groupKey)} 
+                    onDelete={handleDeleteClick}
+                  />
+                ))}
+              </div>
             </div>
-          </div>
-        ))
+          );
+        })
       )}
 
       {/* Delete Confirmation Modal */}

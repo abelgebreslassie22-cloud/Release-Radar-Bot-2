@@ -10,6 +10,7 @@ import { generateCustomPoster } from '../utils/posterGenerator';
 import { DownloadRadarProvider, extractEpisodeOrPack, detectSeasonPack } from '../providers/downloadRadarProvider';
 import { TMDBPremiereProvider } from '../providers/tmdbProvider';
 import { TVMazeProvider } from '../providers/tvmazeProvider';
+import { filterIgnoredDownloads } from './ignoredDownloads';
 
 let isScanning = false;
 
@@ -43,7 +44,8 @@ export async function syncWatchlistItemImmediately(wl: { title: string; year: nu
 
     // 2. Search scene & web release indexers right there for all available qualities and seasons
     const downloadRadar = new DownloadRadarProvider();
-    const downloadMatches = await downloadRadar.findDownloadsForTitle(wl.title, wl.year, wl.type);
+    const rawMatches = await downloadRadar.findDownloadsForTitle(wl.title, wl.year, wl.type);
+    const downloadMatches = await filterIgnoredDownloads(rawMatches);
 
     const downloads: any[] = [];
     const episodeCodes = new Set<string>();
@@ -212,8 +214,9 @@ export async function runScan() {
     let downloadItems: any[] = [];
     try {
       await logInfo('Checking scene release indexers for available downloads...', 'DownloadRadar');
-      downloadItems = await downloadRadar.scan(items);
-      await logSuccess(`Found ${downloadItems.length} active download release(s)`, 'DownloadRadar');
+      const rawDls = await downloadRadar.scan(items);
+      downloadItems = await filterIgnoredDownloads(rawDls);
+      await logSuccess(`Found ${downloadItems.length} active download release(s) (${rawDls.length - downloadItems.length} blacklisted/ignored)`, 'DownloadRadar');
     } catch (e: any) {
       await logWarning(`Download radar scan failed: ${e.message}`, 'DownloadRadar');
     }
@@ -340,9 +343,9 @@ export async function runScan() {
         const cardMeta = (movieCard.metadataJson as any) || {};
         const isInitialSync = cardMeta.initialSyncCompleted !== true;
 
-        const currentDownloads: any[] = Array.isArray(cardMeta.downloads)
-          ? [...cardMeta.downloads]
-          : [];
+        const currentDownloads: any[] = await filterIgnoredDownloads(
+          Array.isArray(cardMeta.downloads) ? [...cardMeta.downloads] : []
+        );
 
         const notifiedEpisodes = new Set<string>(
           Array.isArray(cardMeta.notifiedEpisodes)
@@ -447,11 +450,17 @@ export async function runScan() {
 
         const topSeeds = currentDownloads.reduce((max, d) => Math.max(max, d.seeders || 0), 0);
         const totalLeeches = currentDownloads.reduce((sum, d) => sum + (d.leechers || 0), 0);
+        const hasNewEpisodeDropped = isTV && newEpisodeNotifications.length > 0;
+        let latestEpCode: string | undefined = undefined;
+        if (hasNewEpisodeDropped) {
+          const lastNotif = newEpisodeNotifications[newEpisodeNotifications.length - 1];
+          latestEpCode = extractEpisodeOrPack(lastNotif.title) || extractEpisodeOrPack(lastNotif.releaseType);
+        }
+
         const bestQualitySummary = `🟢 Download Available: ${currentDownloads.length} Qualities • ${topSeeds} Seeds`;
         const bestSourceUrl = currentDownloads[0]?.sourceUrl || movieCard.sourceUrl;
 
-        // Update the SINGLE movie card in releases table (NO duplicate cards created!)
-        await db.update(releases).set({
+        const updatePayload: any = {
           title: wl.title,
           year: wl.year,
           type: wl.type,
@@ -467,10 +476,22 @@ export async function runScan() {
             initialSyncCompleted: true,
             notifiedEpisodes: Array.from(notifiedEpisodes),
             notifiedMovie,
+            latestEpisode: latestEpCode || cardMeta.latestEpisode,
+            lastEpisodeDroppedAt: hasNewEpisodeDropped ? new Date().toISOString() : cardMeta.lastEpisodeDroppedAt,
+            hasNewEpisodeToday: hasNewEpisodeDropped ? true : cardMeta.hasNewEpisodeToday,
             lastSyncedAt: new Date().toISOString()
           },
           updatedAt: new Date()
-        }).where(eq(releases.id, movieCard.id));
+        };
+
+        // When a new episode drops (not just a new quality), move the post card to the top
+        if (hasNewEpisodeDropped) {
+          updatePayload.createdAt = new Date();
+          await logSuccess(`🔥 [Card Moved to Top] New episode "${latestEpCode || 'Drop'}" out today for "${wl.title}"! Bumped card to the top of Recent Releases.`, 'DownloadRadar');
+        }
+
+        // Update the SINGLE movie card in releases table (NO duplicate cards created!)
+        await db.update(releases).set(updatePayload).where(eq(releases.id, movieCard.id));
 
         if (newlyDiscoveredCount > 0) {
           await logInfo(`Updated "${wl.title}" card with ${newlyDiscoveredCount} newly discovered quality release(s)`, 'DownloadRadar');

@@ -1,4 +1,5 @@
 import { runScan } from '../services/scanner';
+import { scanForNewReleases } from '../services/discover';
 import { getSettings } from '../services/settings';
 import { logInfo, logSuccess } from '../services/logger';
 
@@ -20,12 +21,22 @@ export async function startScheduler() {
     logInfo(`Next scan scheduled (Interval: ${intervalMinutes}m)`, 'Scheduler');
     
     currentTimer = setInterval(async () => {
-      await runScan();
+      try {
+        await runScan();
+      } catch (err: any) {
+        console.error('[Scheduler] Watchlist scan error:', err);
+      }
+      try {
+        await scanForNewReleases();
+      } catch (err: any) {
+        console.error('[Scheduler] Discover drops queue scan error:', err);
+      }
       logInfo(`Next scan scheduled (Interval: ${intervalMinutes}m)`, 'Scheduler');
     }, intervalMinutes * 60 * 1000);
 
-    // Run initially
-    runScan();
+    // Run initial scans
+    runScan().catch(() => {});
+    scanForNewReleases().catch(() => {});
   } catch (error) {
     console.error('Failed to start scheduler:', error);
   }
@@ -35,3 +46,8 @@ export function restartScheduler() {
   console.log('Restarting scheduler...');
   startScheduler();
 }
+
+export function isSchedulerActive(): boolean {
+  return currentTimer !== null;
+}
+

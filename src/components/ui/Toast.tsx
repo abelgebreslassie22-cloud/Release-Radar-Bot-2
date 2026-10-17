@@ -8,8 +8,17 @@ interface Toast {
   message: string;
 }
 
+export interface ToastOptions {
+  title?: string;
+  description?: string;
+  message?: string;
+  variant?: 'default' | 'success' | 'error' | 'warning' | 'info';
+  type?: 'success' | 'error' | 'info';
+}
+
 interface ToastContextType {
   toast: (message: string, type?: Toast['type']) => void;
+  addToast: (options: ToastOptions | string) => void;
 }
 
 const ToastContext = createContext<ToastContextType | undefined>(undefined);
@@ -25,8 +34,20 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     }, 5000);
   }, []);
 
+  const addToast = useCallback((options: ToastOptions | string) => {
+    if (typeof options === 'string') {
+      toast(options, 'info');
+      return;
+    }
+    const msg = options.description 
+      ? (options.title ? `${options.title}: ${options.description}` : options.description)
+      : (options.message || options.title || '');
+    const type: Toast['type'] = options.variant === 'error' ? 'error' : options.variant === 'success' ? 'success' : 'info';
+    toast(msg, type);
+  }, [toast]);
+
   return (
-    <ToastContext.Provider value={{ toast }}>
+    <ToastContext.Provider value={{ toast, addToast }}>
       {children}
       <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
         <AnimatePresence>

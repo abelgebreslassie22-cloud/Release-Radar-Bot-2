@@ -56,3 +56,48 @@ export const logs = pgTable('logs', {
   details: jsonb('details'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+export const discoveredReleases = pgTable('discovered_releases', {
+  id: serial('id').primaryKey(),
+  tmdbId: integer('tmdb_id').notNull(),
+  title: text('title').notNull(),
+  year: integer('year').notNull(),
+  type: text('type').notNull(), // 'Movie' or 'Series'
+  category: text('category').notNull(), // 'Movie', 'Series', 'Animation', 'Anime', 'Documentary'
+  originCountry: text('origin_country').notNull(), // 'US'
+  poster: text('poster'),
+  backdrop: text('backdrop'),
+  overview: text('overview'),
+  voteAverage: text('vote_average'),
+  releaseDate: text('release_date'),
+  genres: text('genres'),
+  downloads: jsonb('downloads'),
+  topSeeds: integer('top_seeds').default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => {
+  return {
+    discoveredTmdbIdTypeIdx: uniqueIndex('discovered_releases_tmdb_id_type_idx').on(table.tmdbId, table.type),
+    discoveredTitleIdx: index('discovered_releases_title_idx').on(table.title),
+    discoveredCategoryIdx: index('discovered_releases_category_idx').on(table.category),
+  };
+});
+
+export const ignoredDownloads = pgTable('ignored_downloads', {
+  id: serial('id').primaryKey(),
+  title: text('title').notNull(),
+  normalizedTitle: text('normalized_title'),
+  sourceUrl: text('source_url'),
+  infoHash: text('info_hash'),
+  episodeCode: text('episode_code'),
+  seriesTitle: text('series_title'),
+  reason: text('reason').default('user_deleted'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => {
+  return {
+    ignoredSourceUrlIdx: index('ignored_source_url_idx').on(table.sourceUrl),
+    ignoredInfoHashIdx: index('ignored_info_hash_idx').on(table.infoHash),
+    ignoredTitleIdx: index('ignored_title_idx').on(table.title),
+  };
+});
+

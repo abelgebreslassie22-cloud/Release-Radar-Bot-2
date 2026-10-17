@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CheckCircle2, XCircle, Activity, Server, Database, Bot, HelpCircle, ExternalLink, Key, Terminal, Settings, Zap } from 'lucide-react';
+import { CheckCircle2, XCircle, Activity, Server, Database, Bot, HelpCircle, ExternalLink, Key, Terminal, Settings, Zap, ShieldCheck } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/Card';
 import { Button } from '../ui/Button';
 import { Skeleton } from '../ui/Skeleton';
@@ -42,12 +42,21 @@ export default function HealthView() {
           <p className="text-gray-500 text-sm mt-1">Monitor the status of background services and connections.</p>
         </div>
 
-        <Button
-          onClick={() => { window.location.hash = '#/settings'; }}
-          className="gap-2 self-start bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-sm text-xs font-semibold"
-        >
-          <Settings className="w-4 h-4" /> Open Environment Settings
-        </Button>
+        <div className="flex items-center gap-2.5">
+          <Button
+            onClick={() => { window.location.hash = '#/keepalive'; }}
+            className="gap-2 self-start bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-xs text-xs font-semibold"
+          >
+            <ShieldCheck className="w-4 h-4" /> 24/7 Keep-Alive & Ingress
+          </Button>
+          <Button
+            onClick={() => { window.location.hash = '#/settings'; }}
+            variant="outline"
+            className="gap-2 self-start border-gray-200 text-gray-700 hover:bg-gray-50 rounded-xl shadow-xs text-xs font-semibold"
+          >
+            <Settings className="w-4 h-4 text-gray-500" /> Settings
+          </Button>
+        </div>
       </div>
 
       {needsConfig && (

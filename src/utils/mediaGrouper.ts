@@ -26,6 +26,9 @@ export interface MediaGroup {
   topSeeders: number;
   totalSeeders: number;
   totalLeechers: number;
+  dbReleaseIds?: number[];
+  latestEpisode?: string;
+  hasNewEpisodeToday?: boolean;
 }
 
 export function cleanReleaseTitle(rawTitle: string): string {
@@ -149,8 +152,14 @@ export function groupReleases(releases: ReleaseItem[]): MediaGroup[] {
         topSeeders: 0,
         totalSeeders: 0,
         totalLeechers: 0,
+        dbReleaseIds: [],
       };
       groupsMap.set(groupKey, group);
+    }
+
+    if (rel.id && !group.dbReleaseIds?.includes(rel.id)) {
+      if (!group.dbReleaseIds) group.dbReleaseIds = [];
+      group.dbReleaseIds.push(rel.id);
     }
 
     // Ensure group type becomes Series if any release indicates TV series
@@ -158,10 +167,12 @@ export function groupReleases(releases: ReleaseItem[]): MediaGroup[] {
       group.type = 'Series';
     }
 
-    // Unpack downloads array if stored in metadataJson.downloads
+    // Unpack downloads or allReleases array if stored in metadataJson
     const downloadsList: any[] = Array.isArray(rel.metadataJson?.downloads) && rel.metadataJson.downloads.length > 0
       ? rel.metadataJson.downloads
-      : [rel];
+      : (Array.isArray(rel.metadataJson?.allReleases) && rel.metadataJson.allReleases.length > 0
+        ? rel.metadataJson.allReleases
+        : [rel]);
 
     for (const dl of downloadsList) {
       const itemRelease: ReleaseItem = {
@@ -225,17 +236,52 @@ export function groupReleases(releases: ReleaseItem[]): MediaGroup[] {
     return 0;
   };
 
+  const todayMidnight = new Date();
+  todayMidnight.setHours(0, 0, 0, 0);
+
   const result = Array.from(groupsMap.values()).map(group => {
     group.releases.sort((a, b) => {
       const qDiff = qualityRank(b.releaseType) - qualityRank(a.releaseType);
       if (qDiff !== 0) return qDiff;
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
+
+    // Detect if this group has a new episode released today
+    let latestEpCode: string | undefined = group.metadata?.latestEpisode;
+    let hasNewEpisodeToday = Boolean(group.metadata?.hasNewEpisodeToday);
+
+    for (const r of group.releases) {
+      const epMatch = r.title.match(/\bS(\d{1,2})E(\d{1,2})\b/i) || r.title.match(/\b(\d{1,2})x(\d{1,2})\b/i);
+      if (epMatch) {
+        const epCode = `S${epMatch[1].padStart(2, '0')}E${epMatch[2].padStart(2, '0')}`;
+        if (!latestEpCode) latestEpCode = epCode;
+        const rDate = new Date(r.createdAt);
+        if (rDate >= todayMidnight) {
+          hasNewEpisodeToday = true;
+          latestEpCode = epCode;
+          if (rDate > new Date(group.latestCreatedAt)) {
+            group.latestCreatedAt = r.createdAt;
+          }
+        }
+      }
+    }
+
+    if (hasNewEpisodeToday) {
+      group.hasNewEpisodeToday = true;
+      group.latestEpisode = latestEpCode;
+    } else if (latestEpCode) {
+      group.latestEpisode = latestEpCode;
+    }
+
     return group;
   });
 
-  // Sort groups by latestCreatedAt desc
-  result.sort((a, b) => new Date(b.latestCreatedAt).getTime() - new Date(a.latestCreatedAt).getTime());
+  // Sort groups: cards with new episode drops today are moved to the very top, then by latestCreatedAt desc
+  result.sort((a, b) => {
+    if (a.hasNewEpisodeToday && !b.hasNewEpisodeToday) return -1;
+    if (!a.hasNewEpisodeToday && b.hasNewEpisodeToday) return 1;
+    return new Date(b.latestCreatedAt).getTime() - new Date(a.latestCreatedAt).getTime();
+  });
 
   return result;
 }

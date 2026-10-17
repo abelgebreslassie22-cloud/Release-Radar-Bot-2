@@ -278,6 +278,46 @@ export async function ensureDatabaseSchema() {
         created_at TIMESTAMP DEFAULT NOW() NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS discovered_releases (
+        id SERIAL PRIMARY KEY,
+        tmdb_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        category TEXT NOT NULL,
+        origin_country TEXT NOT NULL,
+        poster TEXT,
+        backdrop TEXT,
+        overview TEXT,
+        vote_average TEXT,
+        release_date TEXT,
+        genres TEXT,
+        downloads JSONB DEFAULT '[]'::jsonb,
+        top_seeds INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS discovered_releases_tmdb_id_type_idx ON discovered_releases (tmdb_id, type);
+      CREATE INDEX IF NOT EXISTS discovered_releases_title_idx ON discovered_releases (title);
+      CREATE INDEX IF NOT EXISTS discovered_releases_category_idx ON discovered_releases (category);
+
+      CREATE TABLE IF NOT EXISTS ignored_downloads (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        normalized_title TEXT,
+        source_url TEXT,
+        info_hash TEXT,
+        episode_code TEXT,
+        series_title TEXT,
+        reason TEXT DEFAULT 'user_deleted',
+        created_at TIMESTAMP DEFAULT NOW() NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS ignored_source_url_idx ON ignored_downloads (source_url);
+      CREATE INDEX IF NOT EXISTS ignored_info_hash_idx ON ignored_downloads (info_hash);
+      CREATE INDEX IF NOT EXISTS ignored_title_idx ON ignored_downloads (title);
+
       -- Add columns if missing for existing databases
       ALTER TABLE releases ADD COLUMN IF NOT EXISTS seeders INTEGER DEFAULT 0;
       ALTER TABLE releases ADD COLUMN IF NOT EXISTS leechers INTEGER DEFAULT 0;

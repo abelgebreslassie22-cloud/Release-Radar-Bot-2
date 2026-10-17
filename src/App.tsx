@@ -2,11 +2,14 @@ import React, { useState, useEffect } from 'react';
 import Sidebar from './components/layout/Sidebar';
 import Topbar from './components/layout/Topbar';
 import DashboardView from './components/views/DashboardView';
+import DiscoverView from './components/views/DiscoverView';
+import DropCalendarView from './components/views/DropCalendarView';
 import WatchlistView from './components/views/WatchlistView';
 import ReleasesView from './components/views/ReleasesView';
 import CategoryView from './components/views/CategoryView';
 import SettingsView from './components/views/SettingsView';
 import HealthView from './components/views/HealthView';
+import KeepAliveView from './components/views/KeepAliveView';
 import LogsView from './components/views/LogsView';
 import MediaDetailView from './components/views/MediaDetailView';
 import { ToastProvider } from './components/ui/Toast';
@@ -14,6 +17,7 @@ import { ToastProvider } from './components/ui/Toast';
 export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  const [previousView, setPreviousView] = useState<string>('releases');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [stats, setStats] = useState<any>(null);
 
@@ -34,9 +38,22 @@ export default function App() {
 
   const navigateTo = (view: string, key?: string) => {
     if (view === 'media-detail' && key) {
+      if (currentView !== 'media-detail') {
+        setPreviousView(currentView);
+      }
       window.location.hash = `#/media/${encodeURIComponent(key)}`;
     } else {
       window.location.hash = `#/${view}`;
+    }
+  };
+
+  const handleDetailBack = () => {
+    if (previousView === 'calendar') {
+      navigateTo('calendar');
+    } else if (selectedGroupKey?.startsWith('discover_') || previousView === 'discover') {
+      navigateTo('discover');
+    } else {
+      navigateTo('releases');
     }
   };
 
@@ -73,13 +90,16 @@ export default function App() {
       return (
         <MediaDetailView 
           groupKey={selectedGroupKey} 
-          onBack={() => navigateTo('releases')} 
+          onBack={handleDetailBack}
+          sourceView={previousView}
         />
       );
     }
 
     switch (currentView) {
       case 'dashboard': return <DashboardView onNavigate={(v) => navigateTo(v)} />;
+      case 'discover': return <DiscoverView onSelectMedia={(key) => navigateTo('media-detail', key)} />;
+      case 'calendar': return <DropCalendarView onSelectMedia={(key) => navigateTo('media-detail', key)} />;
       case 'watchlist': return <WatchlistView />;
       case 'releases': return <ReleasesView onSelectMedia={(key) => navigateTo('media-detail', key)} />;
       case 'movies': return <CategoryView category="Movie" onSelectMedia={(key) => navigateTo('media-detail', key)} />;
@@ -89,6 +109,7 @@ export default function App() {
       case 'documentaries': return <CategoryView category="Documentary" onSelectMedia={(key) => navigateTo('media-detail', key)} />;
       case 'settings': return <SettingsView />;
       case 'health': return <HealthView />;
+      case 'keepalive': return <KeepAliveView />;
       case 'logs': return <LogsView />;
       default: return <DashboardView onNavigate={(v) => navigateTo(v)} />;
     }

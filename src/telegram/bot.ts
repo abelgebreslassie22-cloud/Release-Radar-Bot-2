@@ -16,6 +16,8 @@ import { searchMedia } from '../metadata/tmdb';
 
 let bot: any = null;
 const activeAdminChatIds = new Set<string>();
+let isInitializingBot = false;
+let botInitPromise: Promise<{ success: boolean; botInfo?: any; error?: string }> | null = null;
 
 function escapeHtml(text: string): string {
   if (!text) return '';
@@ -45,22 +47,31 @@ async function getBaseUrl(settingsObj?: any): Promise<string> {
 }
 
 export async function initTelegramBot(customToken?: string, appUrlString?: string): Promise<{ success: boolean; botInfo?: any; error?: string }> {
-  if (process.env.DISABLE_TELEGRAM_BOT === 'true') {
-    console.log('DISABLE_TELEGRAM_BOT is set to true. Skipping Telegram bot initialization.');
-    logInfo('Telegram bot disabled via DISABLE_TELEGRAM_BOT environment variable.', 'Telegram');
-    return { success: false, error: 'Telegram bot disabled via configuration' };
+  if (isInitializingBot && botInitPromise) {
+    return botInitPromise;
+  }
+  if (bot && !customToken) {
+    return { success: true };
   }
 
-  const dbSettings = await getSettings();
-  const token = customToken || process.env.TELEGRAM_BOT_TOKEN || dbSettings?.telegramBotToken;
-  if (!token || !token.trim()) {
-    return { success: false, error: 'No Telegram bot token provided in environment or settings' };
-  }
+  isInitializingBot = true;
+  botInitPromise = (async () => {
+    if (process.env.DISABLE_TELEGRAM_BOT === 'true') {
+      console.log('DISABLE_TELEGRAM_BOT is set to true. Skipping Telegram bot initialization.');
+      logInfo('Telegram bot disabled via DISABLE_TELEGRAM_BOT environment variable.', 'Telegram');
+      return { success: false, error: 'Telegram bot disabled via configuration' };
+    }
 
-  const cleanToken = token.trim();
+    const dbSettings = await getSettings();
+    const token = customToken || dbSettings?.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN;
+    if (!token || !token.trim()) {
+      return { success: false, error: 'No Telegram bot token provided in environment or settings' };
+    }
 
-  // If a bot is already running, stop polling first
-  await stopTelegramBot();
+    const cleanToken = token.trim();
+
+    // If a bot is already running, stop polling first
+    await stopTelegramBot();
 
   try {
     // Validate token first by fetching bot info
@@ -105,13 +116,38 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       }
     });
 
+    // Register standard Telegram bot commands and persistent Chat Menu button
     try {
-      await bot.deleteMyCommands();
-      console.log('Cleared all Telegram bot commands. Interface is strictly button-driven.');
-    } catch (e) {}
+      await bot.setMyCommands([
+        { command: 'start', description: 'Open Control Center & Menu' },
+        { command: 'menu', description: 'Open Control Center' },
+        { command: 'watchlist', description: 'View My Watchlist' },
+        { command: 'recent', description: 'Browse Recent Releases' },
+        { command: 'scan', description: 'Scan Indexers Now' }
+      ]);
+      console.log('Registered Telegram bot commands.');
+    } catch (cmdErr) {
+      console.warn('Failed to register bot commands:', cmdErr);
+    }
+
+    // Configure Telegram bottom-left Chat Menu Button to "commands"
+    try {
+      await fetch(`https://api.telegram.org/bot${cleanToken}/setChatMenuButton`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          menu_button: {
+            type: 'commands'
+          }
+        })
+      });
+      console.log('Telegram Chat Menu Button configured.');
+    } catch (mbErr) {}
 
     const chatSearchResults = new Map<number, any[]>();
     const chatSearchActive = new Set<number>();
+    const processedMessageIds = new Set<string>();
+    const menuInFlight = new Set<number>();
 
     const ensureAdminChatId = async (chatId: number | string) => {
       if (!chatId) return;
@@ -124,19 +160,25 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
           console.log(`Auto-registered Telegram Chat ID ${strId} for notifications.`);
         }
       } catch (e) {}
-    };
 
-    const PERSISTENT_KEYBOARD = {
-      keyboard: [
-        [{ text: '📋 Radar Menu' }]
-      ],
-      resize_keyboard: true,
-      is_persistent: true
+      // Ensure persistent Telegram Menu button is set for this chat
+      try {
+        fetch(`https://api.telegram.org/bot${cleanToken}/setChatMenuButton`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: strId,
+            menu_button: { type: 'commands' }
+          })
+        }).catch(() => {});
+      } catch (e) {}
     };
 
     const lastMenuMessageId = new Map<number, number>();
 
     const sendInlineMenu = async (chatId: number, editMessageId?: number) => {
+      if (menuInFlight.has(chatId)) return;
+      menuInFlight.add(chatId);
       try {
         const baseUrl = await getBaseUrl();
         const inlineKeyboard = [
@@ -179,9 +221,13 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
           }
         }
 
+        // Delete previous menu message so inline buttons never stack up
         const prevId = lastMenuMessageId.get(chatId);
         if (prevId) {
-          bot.deleteMessage(chatId, prevId).catch(() => {});
+          try {
+            await bot.deleteMessage(chatId, prevId);
+          } catch (delErr) {}
+          lastMenuMessageId.delete(chatId);
         }
 
         const sentMsg = await bot.sendMessage(chatId, text, opts);
@@ -190,6 +236,8 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
         }
       } catch (err) {
         console.error('Error sending inline menu:', err);
+      } finally {
+        setTimeout(() => menuInFlight.delete(chatId), 400);
       }
     };
 
@@ -436,32 +484,104 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       }
     };
 
-    // Initial welcome / entry handler (sends the clean inline button dashboard)
-    bot.onText(/\/start/, async (msg: any) => {
-      const chatId = msg.chat.id;
-      await ensureAdminChatId(chatId);
-      await sendInlineMenu(chatId);
-    });
-
-    // Handle persistent keyboard button clicks & plain text title searches
+    // Unified message handler: Single router for commands, persistent buttons, and title searches
     bot.on('message', async (msg: any) => {
       if (!msg.text) return;
-      const text = msg.text.trim();
       const chatId = msg.chat.id;
-      await ensureAdminChatId(chatId);
+      const messageId = msg.message_id;
 
-      // Handle persistent button or any menu request
-      if (text === '📋 Radar Menu' || text === '📋 Menu' || text === 'Menu' || text.startsWith('/')) {
+      // Deduplication check: Guarantee no update is handled twice
+      const msgKey = `${chatId}_${messageId}`;
+      if (processedMessageIds.has(msgKey)) return;
+      processedMessageIds.add(msgKey);
+      if (processedMessageIds.size > 2000) {
+        const first = processedMessageIds.values().next().value;
+        if (first) processedMessageIds.delete(first);
+      }
+
+      await ensureAdminChatId(chatId);
+      const text = msg.text.trim();
+      const lower = text.toLowerCase();
+
+      // Handle /start: Present single inline control center and guarantee persistent Menu button
+      if (lower === '/start' || lower.startsWith('/start ')) {
+        const prevId = lastMenuMessageId.get(chatId);
+        if (prevId) {
+          bot.deleteMessage(chatId, prevId).catch(() => {});
+          lastMenuMessageId.delete(chatId);
+        }
+
+        // Configure persistent chat Menu button for this user immediately
+        try {
+          fetch(`https://api.telegram.org/bot${cleanToken}/setChatMenuButton`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              menu_button: { type: 'commands' }
+            })
+          }).catch(() => {});
+        } catch (e) {}
+
         await sendInlineMenu(chatId);
-      } else if (text === '✖️ Close Menu' || text === 'Close Menu') {
+        return;
+      }
+
+      // Handle Control Center & Menu (triggered by the persistent Menu button, /menu, or text)
+      if (lower === '/menu' || lower === 'menu' || text === 'Menu' || text === '📋 Menu' || text === '📋 Radar Menu') {
+        await sendInlineMenu(chatId);
+        return;
+      }
+
+      // Handle My Watchlist
+      if (lower === '/watchlist' || text === '📋 My Watchlist' || text === 'Watchlist') {
+        await handleWatchlistView(chatId, 0);
+        return;
+      }
+
+      // Handle Recent Releases
+      if (lower === '/recent' || text === '🎬 Recent Releases' || text === 'Recent Releases') {
+        await handleRecentReleasesView(chatId, 0);
+        return;
+      }
+
+      // Handle Force Scan
+      if (lower === '/scan' || text === '🔄 Scan Indexers' || text === '🔄 Scan Now' || text === 'Scan Now') {
+        await handleForceScan(chatId);
+        return;
+      }
+
+      // Handle Add / Search
+      if (lower === '/search' || text === '🔍 Add to Watchlist' || text === '🔍 Search & Add' || text === 'Search') {
+        chatSearchActive.add(chatId);
+        bot.sendMessage(chatId, '🔍 <b>Add to Watchlist</b>\n\nPlease type the name of the movie or TV show to search and track:\n<i>(e.g., Ted Lasso, Severance, Gladiator 2, Dune...)</i>', {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Back to Menu', callback_data: 'action_choose_menu' }, { text: '🗑️ Close', callback_data: 'action_close_menu' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      // Handle Main Dashboard
+      if (lower === '/dashboard' || text === '🍿 Main Dashboard' || text === 'Dashboard') {
+        await sendDashboard(chatId);
+        return;
+      }
+
+      // Handle Close Menu
+      if (text === '✖️ Close Menu' || text === 'Close Menu' || lower === '/close') {
         const prevId = lastMenuMessageId.get(chatId);
         if (prevId) {
           bot.deleteMessage(chatId, prevId).catch(() => {});
         }
-      } else {
-        // Any text typed by the admin is treated as an instant title search to add to watchlist!
-        await handleSearchQuery(chatId, text);
+        return;
       }
+
+      // Any other text is treated as an instant title search to add to watchlist
+      await handleSearchQuery(chatId, text);
     });
 
     // CRITICAL: Callback query handler for all inline buttons
@@ -483,6 +603,9 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
       else if (data === 'action_close_menu') {
         if (messageId) {
           bot.deleteMessage(chatId, messageId).catch(() => {});
+        }
+        if (lastMenuMessageId.get(chatId) === messageId) {
+          lastMenuMessageId.delete(chatId);
         }
       }
       else if (data === 'action_main_menu') {
@@ -607,12 +730,20 @@ export async function initTelegramBot(customToken?: string, appUrlString?: strin
     logError(`Failed to start Telegram bot: ${e.message}`, 'Telegram');
     return { success: false, error: e.message };
   }
+  })();
+
+  try {
+    return await botInitPromise;
+  } finally {
+    isInitializingBot = false;
+    botInitPromise = null;
+  }
 }
 
 export async function sendTelegramNotification(item: ReleaseItem) {
   try {
     const settings = await getSettings();
-    const token = (process.env.TELEGRAM_BOT_TOKEN || settings?.telegramBotToken || '').trim();
+    const token = (settings?.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
 
     const targetChatIds = new Set<string>();
     if (settings?.telegramChatId?.trim()) targetChatIds.add(settings.telegramChatId.trim());
@@ -780,6 +911,11 @@ export async function sendTelegramNotification(item: ReleaseItem) {
           const msgData: any = await msgRes.json();
           if (msgData.ok) {
             totalDelivered++;
+          } else if (msgData.error_code === 401) {
+            const errDesc = `Telegram alert failed (401 Unauthorized): Bot Token was rejected by Telegram. Please check your token in Settings or with @BotFather.`;
+            console.error(errDesc);
+            await logError(errDesc, 'Telegram');
+            break;
           } else {
             const errDesc = `Telegram alert failed for ${targetChatId} (${msgData.error_code}): ${msgData.description}`;
             console.error(errDesc);
@@ -852,13 +988,18 @@ export async function sendTestTelegramAlert(overrideToken?: string, overrideChat
 export async function stopTelegramBot() {
   if (bot) {
     try {
+      if (typeof bot.removeAllListeners === 'function') {
+        bot.removeAllListeners();
+      }
       if (typeof bot.stopPolling === 'function') {
         await bot.stopPolling();
       }
-      console.log('Telegram bot polling stopped.');
-      logInfo('Telegram bot polling stopped.', 'Telegram');
+      console.log('Telegram bot polling stopped and listeners cleared.');
+      logInfo('Telegram bot polling stopped and listeners cleared.', 'Telegram');
     } catch (err: any) {
       console.warn('Error stopping Telegram bot:', err?.message || err);
+    } finally {
+      bot = null;
     }
   }
 }
@@ -886,3 +1027,8 @@ export function processTelegramUpdate(update: any) {
     bot.processUpdate(update);
   }
 }
+
+export function isTelegramBotActive(): boolean {
+  return bot !== null;
+}
+

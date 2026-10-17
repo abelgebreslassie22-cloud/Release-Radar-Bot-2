@@ -20,3 +20,8 @@ export function CardTitle({ className, children, ...props }: React.HTMLAttribute
 export function CardContent({ className, children, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn("p-6", className)} {...props}>{children}</div>;
 }
+
+export function CardDescription({ className, children, ...props }: React.HTMLAttributes<HTMLParagraphElement>) {
+  return <p className={cn("text-xs text-gray-500 mt-1", className)} {...props}>{children}</p>;
+}
+

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Search, Filter, Film } from 'lucide-react';
 import { Skeleton } from '../ui/Skeleton';
-import { groupReleases, MediaGroup, ReleaseItem } from '../../utils/mediaGrouper';
+import { groupReleases, normalizeMediaTitle, MediaGroup, ReleaseItem } from '../../utils/mediaGrouper';
+import { matchesCategory } from '../../utils/categoryHelper';
 import { MediaCard } from '../ui/MediaCard';
 import { useToast } from '../ui/Toast';
 import { ConfirmModal } from '../ui/ConfirmModal';
@@ -27,7 +28,7 @@ export default function CategoryView({ category, onSelectMedia }: CategoryViewPr
         if (Array.isArray(data)) {
           let filtered = data;
           if (category !== 'All') {
-            filtered = data.filter((r: any) => (r.type || 'Movie').toLowerCase() === category.toLowerCase());
+            filtered = data.filter((r: any) => matchesCategory(r, category));
           }
           setRawReleases(filtered);
         }
@@ -50,13 +51,32 @@ export default function CategoryView({ category, onSelectMedia }: CategoryViewPr
       const res = await fetch('/api/releases/delete-batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids }),
+        body: JSON.stringify({ 
+          ids,
+          dbReleaseIds: deleteTarget.dbReleaseIds,
+          canonicalTitle: deleteTarget.canonicalTitle,
+          groupKey: deleteTarget.groupKey,
+          rawTitles: deleteTarget.releases.map(r => r.title)
+        }),
       });
       const data = await res.json();
       if (res.ok && data.success) {
         toast(`Deleted "${deleteTarget.canonicalTitle}"`, 'success');
-        const idsSet = new Set(ids);
-        setRawReleases(prev => prev.filter(r => !idsSet.has(r.id)));
+        const idsSet = new Set([
+          ...ids.map(String),
+          ...(deleteTarget.dbReleaseIds || []).map(String)
+        ]);
+        const targetTitle = deleteTarget.canonicalTitle.toLowerCase();
+        const targetGroupKey = deleteTarget.groupKey.toLowerCase();
+
+        setRawReleases(prev => prev.filter(r => {
+          if (idsSet.has(String(r.id))) return false;
+          const rCanonical = normalizeMediaTitle(r.title).toLowerCase();
+          if (rCanonical === targetTitle || r.title.toLowerCase() === targetTitle) return false;
+          const rCleanKey = rCanonical.replace(/[^a-z0-9]/g, '');
+          if (rCleanKey === targetGroupKey) return false;
+          return true;
+        }));
       } else {
         toast(data.error || 'Failed to delete release', 'error');
       }

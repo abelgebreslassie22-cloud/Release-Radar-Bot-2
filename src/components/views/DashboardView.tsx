@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Film, Clock, ServerCrash, CheckCircle2, AlertCircle, Info } from 'lucide-react';
+import { Activity, Film, Clock, ServerCrash, CheckCircle2, AlertCircle, Info, ShieldCheck, Zap, Sparkles, Calendar } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { Card, CardContent } from '../ui/Card';
 import { Skeleton } from '../ui/Skeleton';
@@ -32,6 +32,22 @@ export default function DashboardView({ onNavigate }: { onNavigate: (view: strin
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold text-gray-900 tracking-tight">Dashboard</h2>
+        <div className="flex items-center gap-2.5">
+          <button
+            onClick={() => onNavigate('calendar')}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-xl text-xs font-semibold transition-all cursor-pointer"
+          >
+            <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+            Drop Calendar
+          </button>
+          <button
+            onClick={() => onNavigate('discover')}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-all cursor-pointer"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            Discover New Drops
+          </button>
+        </div>
       </div>
       
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -49,6 +65,39 @@ export default function DashboardView({ onNavigate }: { onNavigate: (view: strin
           valueColor={stats?.error ? "text-red-600" : "text-gray-900"}
         />
       </div>
+
+      {/* 24/7 Keep-Alive & Supervisor Banner */}
+      <Card className="border-indigo-100 bg-gradient-to-r from-indigo-50/70 via-purple-50/30 to-white shadow-xs">
+        <CardContent className="p-6">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="p-2.5 bg-indigo-600 text-white rounded-xl shadow-xs shrink-0 mt-0.5">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-bold text-gray-900 text-base">24/7 Keep-Alive & Autonomous Supervisor</h3>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    AUTONOMOUS
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600 mt-1 leading-relaxed">
+                  Active anti-sleep ingress loop self-pings every 75s with an automated 30s watchdog. Runs non-stop in the cloud even when your browser tab is closed.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => onNavigate('keepalive')}
+              className="shrink-0 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+            >
+              <Zap className="w-3.5 h-3.5 fill-white" />
+              24/7 Panel & Webhook
+            </button>
+          </div>
+        </CardContent>
+      </Card>
+
 
       {stats?.error && (
         <Card className="border-red-100 bg-red-50/50">
