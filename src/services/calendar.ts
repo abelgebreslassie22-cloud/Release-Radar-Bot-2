@@ -47,11 +47,16 @@ interface CacheEntry {
 const calendarCache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+export function clearCalendarCache() {
+  calendarCache.clear();
+}
+
 export async function getCalendarSchedule(options: {
   daysPast?: number;
   daysAhead?: number;
   category?: string;
   watchlistOnly?: boolean;
+  refresh?: boolean;
 }): Promise<{
   today: string;
   startDate: string;
@@ -62,7 +67,7 @@ export async function getCalendarSchedule(options: {
   availableCount: number;
 }> {
   const daysPast = options.daysPast ?? 2;
-  const daysAhead = options.daysAhead ?? 12;
+  const daysAhead = options.daysAhead ?? 11; // 2 past + today + 11 ahead = 14 days total
   const now = new Date();
   const todayStr = now.toISOString().split('T')[0];
 
@@ -73,9 +78,11 @@ export async function getCalendarSchedule(options: {
   const endDateStr = endDateObj.toISOString().split('T')[0];
 
   const cacheKey = `${options.category || 'All'}_${options.watchlistOnly ? 'wl' : 'all'}_${daysPast}_${daysAhead}`;
-  const cached = calendarCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-    return cached.data;
+  if (!options.refresh) {
+    const cached = calendarCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return cached.data;
+    }
   }
 
   const settings = await getSettings();
@@ -185,21 +192,73 @@ export async function getCalendarSchedule(options: {
       if (cat === 'series' && !(itemCat === 'series' || itemType === 'series' || itemType === 'tv')) return;
       if (cat === 'movies' && !(itemCat === 'movie' || itemType === 'movie')) return;
       if (cat === 'anime' && !(itemCat === 'anime' || itemType === 'anime')) return;
-      if (cat === 'animation' && !(itemCat === 'animation' || itemType === 'animation')) return;
+      if (cat === 'animation' && !(itemCat === 'animation' || itemType === 'animation' || itemCat === 'anime')) return;
     }
 
     // Check if within window
     if (item.airDate < startDateStr || item.airDate > endDateStr) return;
 
     const current = dropsByDate.get(item.airDate) || [];
-    // Prevent duplicate entries for same title and episode on same date
-    const exists = current.some(d => 
-      d.title.toLowerCase() === item.title.toLowerCase() && 
-      (d.episodeCode === item.episodeCode || (!d.episodeCode && !item.episodeCode))
-    );
-    if (!exists) {
+    const cleanTitle = item.title.toLowerCase().trim();
+    
+    // Check if an entry for this show or movie already exists on this day
+    const existingIndex = current.findIndex(d => {
+      if (item.tmdbId && d.tmdbId && item.tmdbId === d.tmdbId) return true;
+      return d.title.toLowerCase().trim() === cleanTitle;
+    });
+
+    if (existingIndex === -1) {
       current.push(item);
       dropsByDate.set(item.airDate, current);
+    } else {
+      // Merge into a single card to eliminate duplicate cards for the same show on the same day
+      const existing = current[existingIndex];
+      const hasItemEp = Boolean(item.episodeCode);
+      const hasExistingEp = Boolean(existing.episodeCode);
+
+      const bestSeeders = Math.max(existing.seeders || 0, item.seeders || 0);
+      const bestMagnet = (item.seeders || 0) >= (existing.seeders || 0)
+        ? (item.magnetUrl || existing.magnetUrl)
+        : (existing.magnetUrl || item.magnetUrl);
+      const bestQuality = (item.seeders || 0) >= (existing.seeders || 0)
+        ? (item.topQuality || existing.topQuality)
+        : (existing.topQuality || item.topQuality);
+      const allQualities = Array.from(new Set([...(existing.qualities || []), ...(item.qualities || [])]));
+      const isAvailable = bestSeeders > 0 || existing.status === 'available' || item.status === 'available';
+
+      // If the new item has an episode code (e.g., S38E03) and existing was generic, promote the new episode card
+      if (hasItemEp && !hasExistingEp) {
+        current[existingIndex] = {
+          ...item,
+          seeders: bestSeeders,
+          magnetUrl: bestMagnet,
+          topQuality: bestQuality,
+          qualities: allQualities,
+          status: isAvailable ? 'available' : item.status,
+          countdownText: bestSeeders > 0 ? `Available (${bestSeeders.toLocaleString()} seeds)` : item.countdownText,
+          inWatchlist: existing.inWatchlist || item.inWatchlist,
+          poster: item.poster || existing.poster,
+          backdrop: item.backdrop || existing.backdrop,
+          overview: item.overview || existing.overview
+        };
+      } else {
+        // Existing already has episode code or both are generic: update existing with best data
+        current[existingIndex] = {
+          ...existing,
+          episodeCode: existing.episodeCode || item.episodeCode,
+          episodeTitle: existing.episodeTitle || item.episodeTitle,
+          seeders: bestSeeders,
+          magnetUrl: bestMagnet,
+          topQuality: bestQuality,
+          qualities: allQualities,
+          status: isAvailable ? 'available' : existing.status,
+          countdownText: bestSeeders > 0 ? `Available (${bestSeeders.toLocaleString()} seeds)` : existing.countdownText,
+          inWatchlist: existing.inWatchlist || item.inWatchlist,
+          poster: existing.poster || item.poster,
+          backdrop: existing.backdrop || item.backdrop,
+          overview: (hasExistingEp ? existing.overview : item.overview) || existing.overview
+        };
+      }
     }
   };
 
@@ -212,7 +271,8 @@ export async function getCalendarSchedule(options: {
       const qualities = Array.from(new Set(dls.map((d: any) => d.quality).filter(Boolean))) as string[];
       const topMagnet = dls[0]?.magnetUrl || dls[0]?.sourceUrl;
 
-      const epParsed = parseEpisodeInfo(disc.title, '');
+      const topDlTitle = dls[0]?.title || '';
+      const epParsed = parseEpisodeInfo(disc.title, topDlTitle);
       const epCode = epParsed.hasEpisode ? epParsed.code : undefined;
 
       addDrop({
@@ -240,75 +300,123 @@ export async function getCalendarSchedule(options: {
     }
   }
 
-  // B. TMDB Queries for TV and Movies
+  // B. TMDB Queries for TV and Movies (Category-Aware)
   if (apiKey) {
     try {
-      // Run queries in parallel: on_the_air (week 1), airing_today, anime, week 2 discover, and movies (2 pages)
-      const [onAir1, onAir2, airingTodayRes, animeRes, week2TvRes, mov1Res, mov2Res] = await Promise.all([
-        axios.get('https://api.themoviedb.org/3/tv/on_the_air', { params: { api_key: apiKey, page: 1 }, timeout: 5000 }).catch(() => ({ data: { results: [] } })),
-        axios.get('https://api.themoviedb.org/3/tv/on_the_air', { params: { api_key: apiKey, page: 2 }, timeout: 5000 }).catch(() => ({ data: { results: [] } })),
-        axios.get('https://api.themoviedb.org/3/tv/airing_today', { params: { api_key: apiKey, page: 1 }, timeout: 5000 }).catch(() => ({ data: { results: [] } })),
-        axios.get('https://api.themoviedb.org/3/discover/tv', {
-          params: {
-            api_key: apiKey,
-            with_genres: 16,
-            with_original_language: 'ja',
-            'air_date.gte': startDateStr,
-            'air_date.lte': endDateStr,
-            sort_by: 'popularity.desc'
-          },
-          timeout: 5000
-        }).catch(() => ({ data: { results: [] } })),
-        axios.get('https://api.themoviedb.org/3/discover/tv', {
-          params: {
-            api_key: apiKey,
-            'air_date.gte': new Date(now.getTime() + 7 * 86400000).toISOString().split('T')[0],
-            'air_date.lte': endDateStr,
-            sort_by: 'popularity.desc',
-            page: 1
-          },
-          timeout: 5000
-        }).catch(() => ({ data: { results: [] } })),
-        axios.get('https://api.themoviedb.org/3/discover/movie', {
-          params: {
-            api_key: apiKey,
-            'primary_release_date.gte': startDateStr,
-            'primary_release_date.lte': endDateStr,
-            sort_by: 'popularity.desc',
-            page: 1
-          },
-          timeout: 5000
-        }).catch(() => ({ data: { results: [] } })),
-        axios.get('https://api.themoviedb.org/3/discover/movie', {
-          params: {
-            api_key: apiKey,
-            'primary_release_date.gte': startDateStr,
-            'primary_release_date.lte': endDateStr,
-            sort_by: 'popularity.desc',
-            page: 2
-          },
-          timeout: 5000
-        }).catch(() => ({ data: { results: [] } }))
-      ]);
-
-      // Collect unique TV shows
+      const targetCat = (options.category || 'All').toLowerCase();
       const uniqueTvShows = new Map<number, any>();
-      const rawTvList = [
-        ...(onAir1.data.results || []),
-        ...(onAir2.data.results || []),
-        ...(airingTodayRes.data.results || []),
-        ...(animeRes.data.results || []),
-        ...(week2TvRes.data.results || [])
-      ];
+      let allMovies: any[] = [];
 
-      for (const show of rawTvList) {
-        if (show && show.id && !uniqueTvShows.has(show.id)) {
-          uniqueTvShows.set(show.id, show);
+      if (targetCat === 'anime') {
+        // Query 3 pages of anime scheduled in the window
+        const [a1, a2, a3] = await Promise.all([
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, with_original_language: 'ja', 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 1 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, with_original_language: 'ja', 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 2 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, with_original_language: 'ja', 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 3 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } }))
+        ]);
+        const shows = [...(a1.data.results || []), ...(a2.data.results || []), ...(a3.data.results || [])];
+        for (const show of shows) {
+          if (show && show.id && !uniqueTvShows.has(show.id)) {
+            uniqueTvShows.set(show.id, show);
+          }
+        }
+      } else if (targetCat === 'animation') {
+        // Query 3 pages of animation scheduled in the window
+        const [an1, an2, an3] = await Promise.all([
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 1 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 2 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 3 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } }))
+        ]);
+        const shows = [...(an1.data.results || []), ...(an2.data.results || []), ...(an3.data.results || [])];
+        for (const show of shows) {
+          if (show && show.id && !uniqueTvShows.has(show.id)) {
+            uniqueTvShows.set(show.id, show);
+          }
+        }
+      } else if (targetCat === 'series') {
+        // Query live-action TV series
+        const [s1, s2, s3] = await Promise.all([
+          axios.get('https://api.themoviedb.org/3/tv/on_the_air', { params: { api_key: apiKey, page: 1 }, timeout: 5000 }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/tv/on_the_air', { params: { api_key: apiKey, page: 2 }, timeout: 5000 }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, without_genres: 16, 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 1 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } }))
+        ]);
+        const shows = [...(s1.data.results || []), ...(s2.data.results || []), ...(s3.data.results || [])];
+        for (const show of shows) {
+          if (show && show.id && !uniqueTvShows.has(show.id)) {
+            uniqueTvShows.set(show.id, show);
+          }
+        }
+      } else if (targetCat === 'movies') {
+        // Query 3 pages of movies
+        const [m1, m2, m3] = await Promise.all([
+          axios.get('https://api.themoviedb.org/3/discover/movie', { params: { api_key: apiKey, 'primary_release_date.gte': startDateStr, 'primary_release_date.lte': endDateStr, sort_by: 'popularity.desc', page: 1 }, timeout: 5000 }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/movie', { params: { api_key: apiKey, 'primary_release_date.gte': startDateStr, 'primary_release_date.lte': endDateStr, sort_by: 'popularity.desc', page: 2 }, timeout: 5000 }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/movie', { params: { api_key: apiKey, 'primary_release_date.gte': startDateStr, 'primary_release_date.lte': endDateStr, sort_by: 'popularity.desc', page: 3 }, timeout: 5000 }).catch(() => ({ data: { results: [] } }))
+        ]);
+        allMovies = [...(m1.data.results || []), ...(m2.data.results || []), ...(m3.data.results || [])];
+      } else {
+        // 'All': Query a balanced cohort across Series, Anime, Animation, and Movies
+        const [onAirRes, animeP1, animeP2, animP1, m1, m2] = await Promise.all([
+          axios.get('https://api.themoviedb.org/3/tv/on_the_air', { params: { api_key: apiKey, page: 1 }, timeout: 5000 }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, with_original_language: 'ja', 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 1 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, with_original_language: 'ja', 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 2 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/tv', {
+            params: { api_key: apiKey, with_genres: 16, without_original_language: 'ja', 'air_date.gte': startDateStr, 'air_date.lte': endDateStr, sort_by: 'popularity.desc', page: 1 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/movie', {
+            params: { api_key: apiKey, 'primary_release_date.gte': startDateStr, 'primary_release_date.lte': endDateStr, sort_by: 'popularity.desc', page: 1 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } })),
+          axios.get('https://api.themoviedb.org/3/discover/movie', {
+            params: { api_key: apiKey, 'primary_release_date.gte': startDateStr, 'primary_release_date.lte': endDateStr, sort_by: 'popularity.desc', page: 2 },
+            timeout: 5000
+          }).catch(() => ({ data: { results: [] } }))
+        ]);
+
+        allMovies = [...(m1.data.results || []), ...(m2.data.results || [])];
+
+        const seriesList = (onAirRes.data.results || []).filter((s: any) => !s.genre_ids?.includes(16)).slice(0, 18);
+        const animeList = [...(animeP1.data.results || []), ...(animeP2.data.results || [])].slice(0, 18);
+        const animList = (animP1.data.results || []).slice(0, 14);
+
+        const balancedShows = [...seriesList, ...animeList, ...animList];
+        for (const show of balancedShows) {
+          if (show && show.id && !uniqueTvShows.has(show.id)) {
+            uniqueTvShows.set(show.id, show);
+          }
         }
       }
 
-      // Query TV show details in parallel (limit to top 42 shows for speed)
-      const selectedTvShows = Array.from(uniqueTvShows.values()).slice(0, 42);
+      // Query TV show details in parallel (up to 46 shows)
+      const selectedTvShows = Array.from(uniqueTvShows.values()).slice(0, 46);
       const tvDetailsList = await Promise.all(
         selectedTvShows.map(show =>
           axios.get(`https://api.themoviedb.org/3/tv/${show.id}`, {
@@ -443,7 +551,6 @@ export async function getCalendarSchedule(options: {
       }
 
       // Process Movies
-      const allMovies = [...(mov1Res.data.results || []), ...(mov2Res.data.results || [])];
       for (const movie of allMovies) {
         if (!movie || !movie.title || !movie.release_date) continue;
         const releaseDate = movie.release_date;
@@ -496,7 +603,7 @@ export async function getCalendarSchedule(options: {
   let todayDropsCount = 0;
   let availableCount = 0;
 
-  while (iterDate <= endDateObj) {
+  while (days.length < 14 && iterDate <= endDateObj) {
     const dStr = iterDate.toISOString().split('T')[0];
     const isToday = dStr === todayStr;
     const isPast = dStr < todayStr;
@@ -532,11 +639,13 @@ export async function getCalendarSchedule(options: {
     iterDate.setDate(iterDate.getDate() + 1);
   }
 
+  const finalDays = days.slice(0, 14);
+
   const result = {
     today: todayStr,
-    startDate: startDateStr,
-    endDate: endDateStr,
-    days,
+    startDate: finalDays[0]?.date || startDateStr,
+    endDate: finalDays[finalDays.length - 1]?.date || endDateStr,
+    days: finalDays,
     totalDrops,
     todayDropsCount,
     availableCount

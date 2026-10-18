@@ -309,11 +309,12 @@ export function setupRoutes(app: Express) {
   app.get('/api/calendar', async (req: Request, res: Response) => {
     try {
       const daysPast = req.query.daysPast ? parseInt(req.query.daysPast as string, 10) : 2;
-      const daysAhead = req.query.daysAhead ? parseInt(req.query.daysAhead as string, 10) : 12;
+      const daysAhead = req.query.daysAhead ? parseInt(req.query.daysAhead as string, 10) : 11;
       const category = (req.query.category as string) || 'All';
       const watchlistOnly = req.query.watchlistOnly === 'true';
+      const refresh = req.query.refresh === 'true';
 
-      const schedule = await getCalendarSchedule({ daysPast, daysAhead, category, watchlistOnly });
+      const schedule = await getCalendarSchedule({ daysPast, daysAhead, category, watchlistOnly, refresh });
       res.json(schedule);
     } catch (e: any) {
       res.status(500).json({ error: e.message || 'Failed to fetch calendar schedule' });

@@ -12,7 +12,7 @@ import { ensureDatabaseSchema } from './src/database/db';
 // Ensure IPv4 is preferred for all DNS lookups
 dns.setDefaultResultOrder('ipv4first');
 
-dotenv.config();
+dotenv.config({ override: true });
 
 const INSTANCE_ID = crypto.randomBytes(4).toString('hex');
 console.log(`Starting Application Instance ID: ${INSTANCE_ID}`);

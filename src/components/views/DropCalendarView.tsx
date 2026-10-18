@@ -84,13 +84,14 @@ export default function DropCalendarView({ onSelectMedia }: DropCalendarViewProp
   const [selectedDayDate, setSelectedDayDate] = useState<string | null>(null);
   const { addToast } = useToast();
 
-  const fetchCalendar = () => {
+  const fetchCalendar = (isRefresh = false) => {
     setLoading(true);
     const params = new URLSearchParams();
     params.set('category', selectedCategory);
     if (watchlistOnly) params.set('watchlistOnly', 'true');
     params.set('daysPast', '2');
-    params.set('daysAhead', '12');
+    params.set('daysAhead', '11');
+    if (isRefresh) params.set('refresh', 'true');
 
     fetch(`/api/calendar?${params.toString()}`)
       .then(res => res.json())
@@ -203,15 +204,37 @@ export default function DropCalendarView({ onSelectMedia }: DropCalendarViewProp
   const todayGroup = days.find(d => d.isToday);
   const selectedDay = days.find(d => d.date === selectedDayDate) || todayGroup || days[0];
 
-  // Filter drops by search query
+  // Filter drops by search query and deduplicate so no show ever has 2 cards on the same day
   const filterDrops = (dropList: CalendarDropItem[]) => {
-    if (!searchQuery) return dropList;
-    const q = searchQuery.toLowerCase();
-    return dropList.filter(d => 
-      d.title.toLowerCase().includes(q) || 
-      (d.episodeCode && d.episodeCode.toLowerCase().includes(q)) ||
-      (d.category && d.category.toLowerCase().includes(q))
-    );
+    let list = dropList;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(d => 
+        d.title.toLowerCase().includes(q) || 
+        (d.episodeCode && d.episodeCode.toLowerCase().includes(q)) ||
+        (d.category && d.category.toLowerCase().includes(q))
+      );
+    }
+    // Deduplicate so each show only has 1 card on the same day (prefer episode code / higher seeders)
+    const map = new Map<string, CalendarDropItem>();
+    for (const d of list) {
+      const key = d.tmdbId ? `tmdb_${d.tmdbId}` : d.title.toLowerCase().trim();
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, d);
+      } else {
+        if ((d.episodeCode && !existing.episodeCode) || ((d.seeders || 0) > (existing.seeders || 0))) {
+          map.set(key, {
+            ...d,
+            seeders: Math.max(d.seeders || 0, existing.seeders || 0),
+            magnetUrl: d.magnetUrl || existing.magnetUrl,
+            inWatchlist: d.inWatchlist || existing.inWatchlist,
+            topQuality: d.topQuality || existing.topQuality
+          });
+        }
+      }
+    }
+    return Array.from(map.values());
   };
 
   return (
@@ -253,7 +276,7 @@ export default function DropCalendarView({ onSelectMedia }: DropCalendarViewProp
           </div>
 
           <button
-            onClick={fetchCalendar}
+            onClick={() => fetchCalendar(true)}
             disabled={loading}
             className="p-2.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors cursor-pointer"
             title="Refresh Airing Schedule"

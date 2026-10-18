@@ -130,6 +130,8 @@ export default function App() {
             onMenuClick={() => setIsMobileMenuOpen(true)} 
             lastScan={stats?.lastScan}
             scanInterval={stats?.scanInterval || 10}
+            onSelectMedia={(key) => navigateTo('media-detail', key)}
+            onNavigate={(v) => navigateTo(v)}
           />
           <div className="flex-1 overflow-y-auto p-4 sm:p-8">
             <div className="max-w-[1600px] mx-auto">

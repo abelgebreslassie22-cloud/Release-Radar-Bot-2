@@ -35,31 +35,33 @@ export function extractQuality(name: string): string {
   const isH265 = /x265|hevc|10bit/i.test(name);
   const isBluray = /bluray|bdrip|brrip/i.test(name);
   const isWeb = /web-?dl|webrip|web\b|amzn|atvp|hmax|nf|disney|apple/i.test(name);
+  const isDualAudio = /dual[- ]?audio|multi[- ]?audio/i.test(name);
+  const audioTag = isDualAudio ? ' [Dual-Audio]' : '';
 
   if (/2160p|4k|uhd/i.test(name)) {
-    if (isRemux) return '2160p 4K Remux';
-    if (isHDR) return '2160p 4K HDR';
-    return '2160p 4K UHD';
+    if (isRemux) return `2160p 4K Remux${audioTag}`;
+    if (isHDR) return `2160p 4K HDR${audioTag}`;
+    return `2160p 4K UHD${audioTag}`;
   }
   if (/1080p/i.test(name)) {
-    if (isRemux) return '1080p Remux';
+    if (isRemux) return `1080p Remux${audioTag}`;
     if (isBluray) {
-      return isH265 ? '1080p BluRay x265' : '1080p BluRay';
+      return isH265 ? `1080p BluRay x265${audioTag}` : `1080p BluRay${audioTag}`;
     }
-    if (isH265) return '1080p WEB x265';
-    if (isWeb) return '1080p WEB-DL';
-    return '1080p HD';
+    if (isH265) return `1080p WEB x265${audioTag}`;
+    if (isWeb) return `1080p WEB-DL${audioTag}`;
+    return `1080p HD${audioTag}`;
   }
   if (/720p/i.test(name)) {
-    if (isWeb) return '720p WEB-DL';
-    return '720p HD';
+    if (isWeb) return `720p WEB-DL${audioTag}`;
+    return `720p HD${audioTag}`;
   }
   if (/480p|dvdrip|xvid|sd\b/i.test(name)) {
-    return '480p SD';
+    return `480p SD${audioTag}`;
   }
-  if (isBluray) return 'BluRay';
-  if (isWeb) return 'WEB-DL';
-  return 'HD';
+  if (isBluray) return `BluRay${audioTag}`;
+  if (isWeb) return `WEB-DL${audioTag}`;
+  return `HD${audioTag}`;
 }
 
 export { detectSeasonPack, extractEpisodeOrPack, type SeasonPackInfo } from '../utils/seasonPack';
@@ -263,7 +265,7 @@ export class DownloadRadarProvider implements Provider {
     // 4. YTS Movie API (Multi-mirror for movies with cloud fallback)
     const fetchYTS = async () => {
       if (isTV) return;
-      const ytsMirrors = ['https://yts.lt', 'https://yts.am', 'https://yts.bz', 'https://yts.mx'];
+      const ytsMirrors = ['https://yts.am', 'https://yts.bz', 'https://yts.lt'];
 
       for (const baseMirror of ytsMirrors) {
         try {
@@ -307,12 +309,60 @@ export class DownloadRadarProvider implements Provider {
       }
     };
 
+    // 5. Tokyo Toshokan (Fast Anime & Animation Scene RSS with zero anti-bot)
+    const fetchTokyoToshokan = async () => {
+      try {
+        const url = `https://www.tokyotosho.info/rss.php?terms=${encodeURIComponent(cleanTitle)}`;
+        const res = await axios.get(url, { timeout: 4500, headers: BROWSER_HEADERS });
+        const rawItems = (res.data || '').match(/<item>[\s\S]*?<\/item>/g) || [];
+        const normQuery = cleanTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+        for (const itemXml of rawItems) {
+          const titleMatch = itemXml.match(/<title>(.*?)<\/title>/);
+          if (!titleMatch) continue;
+
+          const name = titleMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim();
+          const normName = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (!normName.includes(normQuery)) continue;
+
+          const hashMatch = itemXml.match(/\b([a-fA-F0-9]{40})\b/);
+          if (!hashMatch) continue;
+          const infoHash = hashMatch[1].toLowerCase();
+
+          const descMatch = itemXml.match(/<description>([\s\S]*?)<\/description>/);
+          const sizeMatch = descMatch ? descMatch[1].match(/Size:\s*([\d.]+\s*[KMGT]B)/i) : null;
+          const sizeText = sizeMatch ? sizeMatch[1] : '';
+
+          const quality = extractQuality(name);
+          const episodeCode = extractEpisodeOrPack(name);
+          const magnetUrl = createMagnet(infoHash, name);
+
+          addMatch({
+            title,
+            name,
+            quality,
+            sizeText: sizeText || 'HD',
+            sizeBytes: 0,
+            seeders: 20,
+            leechers: 2,
+            infoHash,
+            magnetUrl,
+            sourceUrl: magnetUrl,
+            episodeCode
+          });
+        }
+      } catch (e: any) {
+        // Fallback continues
+      }
+    };
+
     // Run independent indexers in parallel with fault tolerance
     await Promise.allSettled([
       fetchTorrentsCsv(),
       fetchEZTV(),
       fetchApibay(),
-      fetchYTS()
+      fetchYTS(),
+      fetchTokyoToshokan()
     ]);
 
     // Sort all aggregated results by seeders descending

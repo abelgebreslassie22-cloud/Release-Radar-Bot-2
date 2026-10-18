@@ -8,7 +8,7 @@ import { extractEpisodeOrPack } from '../providers/downloadRadarProvider';
 // Fix Node 17+ ENETUNREACH issues by preferring IPv4 for database connections
 dns.setDefaultResultOrder('ipv4first');
 
-dotenv.config();
+dotenv.config({ override: true });
 
 function createPool(connectionString?: string) {
   if (!connectionString) {
@@ -259,6 +259,7 @@ export async function ensureDatabaseSchema() {
       CREATE TABLE IF NOT EXISTS settings (
         id SERIAL PRIMARY KEY,
         scan_interval INTEGER DEFAULT 10 NOT NULL,
+        telegram_bot_token TEXT,
         telegram_chat_id TEXT,
         metadata_api_key TEXT,
         debug_mode INTEGER DEFAULT 0 NOT NULL,
@@ -324,6 +325,8 @@ export async function ensureDatabaseSchema() {
       ALTER TABLE releases ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
       ALTER TABLE settings ADD COLUMN IF NOT EXISTS app_url TEXT;
       ALTER TABLE settings ADD COLUMN IF NOT EXISTS provider_type TEXT DEFAULT 'RSS';
+      ALTER TABLE settings ADD COLUMN IF NOT EXISTS telegram_bot_token TEXT;
+      ALTER TABLE settings ADD COLUMN IF NOT EXISTS enabled_providers TEXT;
     `);
 
     // Consolidate fragmented releases into 1 card per movie/show

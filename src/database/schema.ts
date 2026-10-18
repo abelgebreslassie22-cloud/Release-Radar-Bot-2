@@ -44,6 +44,7 @@ export const settings = pgTable('settings', {
   providerType: text('provider_type').default('NONE').notNull(),
   providerUrl: text('provider_url'),
   appUrl: text('app_url'),
+  enabledProviders: text('enabled_providers'),
   lastScan: timestamp('last_scan'),
   activeInstanceId: text('active_instance_id'),
 });

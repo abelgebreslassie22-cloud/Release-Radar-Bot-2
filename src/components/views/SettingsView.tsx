@@ -579,21 +579,21 @@ export default function SettingsView() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-900 mb-1">
-                  Data Provider
+                  Data Provider Engine
                 </label>
                 <select
                   value={form.providerType}
                   onChange={e => setForm({ ...form, providerType: e.target.value })}
                   className="w-full px-3 py-2.5 bg-white border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium"
                 >
-                  <option value="TMDB">Real-Time Download Radar + TMDB (Recommended)</option>
-                  <option value="DOWNLOAD_RADAR">Download Availability Radar Only (Scene Torrents & Magnets)</option>
+                  <option value="TMDB">🌐 All Providers & Multi-Indexer Radar (All Torrent Websites + TMDB) [Recommended]</option>
+                  <option value="DOWNLOAD_RADAR">⚡ All Torrent Indexers Only (Apibay + EZTV + YTS + Torrents-CSV + Tokyo Toshokan)</option>
                   <option value="RSS">Custom RSS Feed</option>
                   <option value="MOCK">Mock Provider (Testing)</option>
                   <option value="NONE">Disabled</option>
                 </select>
                 <p className="text-xs text-gray-500 mt-1.5">
-                  Tracks the exact moment movies and episodes drop online with 1080p/4K download & magnet links, seed counts, and official streaming dates.
+                  Every search queries all unblocked providers in parallel, aggregating verified 4K, 1080p, and 720p downloads.
                 </p>
               </div>
 
@@ -612,10 +612,77 @@ export default function SettingsView() {
               </div>
             </div>
 
-            {form.providerType === 'TMDB' && (
-              <div className="p-4 bg-indigo-50/70 border border-indigo-100 rounded-xl text-xs text-indigo-900 leading-relaxed">
-                <strong className="font-semibold block mb-1 text-sm text-indigo-950">📡 TMDB Digital Premiere & TV Schedule Polling Active</strong>
-                The bot directly monitors your watchlist against The Movie Database (TMDB). It detects official digital releases (VOD, Apple TV, Amazon Prime, Google Play), physical disc availability (4K UHD & Blu-ray), and live TV episode air dates. The moment an item reaches its premiere date, an instant notification is dispatched to Telegram.
+            {(form.providerType === 'TMDB' || form.providerType === 'DOWNLOAD_RADAR') && (
+              <div className="p-4 bg-gray-50 border border-gray-200 rounded-2xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <strong className="text-xs font-bold text-gray-900 uppercase tracking-wider flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    Active Multi-Source Torrent Indexers (Queried Every Search)
+                  </strong>
+                  <span className="text-[11px] font-semibold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                    All 5 Engine Sources Active
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 text-xs">
+                  <div className="p-2.5 bg-white border border-gray-200/80 rounded-xl">
+                    <div className="font-bold text-gray-900 flex items-center gap-1.5">
+                      <span className="text-emerald-500 font-black">✓</span> Apibay Scene Engine
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">
+                      4K UHD, 1080p Remux, BluRay & WEB-DL
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 bg-white border border-gray-200/80 rounded-xl">
+                    <div className="font-bold text-gray-900 flex items-center gap-1.5">
+                      <span className="text-emerald-500 font-black">✓</span> EZTV Multi-Mirrors
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">
+                      TV series episodes & full season packs
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 bg-white border border-gray-200/80 rounded-xl">
+                    <div className="font-bold text-gray-900 flex items-center gap-1.5">
+                      <span className="text-emerald-500 font-black">✓</span> YTS Movie Mirrors
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">
+                      Compact 720p, 1080p, and 2160p 4K movies
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 bg-white border border-gray-200/80 rounded-xl">
+                    <div className="font-bold text-gray-900 flex items-center gap-1.5">
+                      <span className="text-emerald-500 font-black">✓</span> Torrents-CSV Database
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">
+                      Verified hashes & open community releases
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 bg-white border border-gray-200/80 rounded-xl">
+                    <div className="font-bold text-gray-900 flex items-center gap-1.5">
+                      <span className="text-emerald-500 font-black">✓</span> Tokyo Toshokan RSS
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">
+                      Anime, animation & dual-audio releases
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 bg-white border border-gray-200/80 rounded-xl">
+                    <div className="font-bold text-gray-900 flex items-center gap-1.5">
+                      <span className="text-indigo-500 font-black">✓</span> TMDB Airing Radar
+                    </div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">
+                      Official digital releases & streaming dates
+                    </div>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-gray-500 italic">
+                  Release Radar executes parallel lookups across all 5 indexers with anti-bot bypass and zero scraping locks, automatically consolidating duplicates and ranking the healthiest seeders.
+                </p>
               </div>
             )}
 
